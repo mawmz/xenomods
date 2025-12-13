@@ -1,6 +1,7 @@
 #include "RenderingControls.hpp"
 
 #include "DebugStuff.hpp"
+#include "xenomods/stuff/utils/debug_util.hpp"
 #include "xenomods/engine/effect/SystemManager.hpp"
 #include "xenomods/engine/fw/Managers.hpp"
 #include "xenomods/engine/gf/MenuObject.hpp"
@@ -109,6 +110,24 @@ namespace {
 			this_pointer->slopeRot = temp;
 		}
 	};
+
+	struct DisableFadeMode : skylaunch::hook::Trampoline<DisableFadeMode> {
+		static void Hook(gf::GfObjAcc* objAcc, bool param) {
+			//dbgutil::logStackTrace();
+			if (!xenomods::RenderingControls::disableModelFade)
+				return Orig(objAcc, param);
+			Orig(objAcc, false);
+		}
+	};
+
+	struct DisableFadeAlpha : skylaunch::hook::Trampoline<DisableFadeAlpha> {
+		static bool Hook(gf::GfObjAcc* objAcc) {
+			//dbgutil::logStackTrace();
+			if (!xenomods::RenderingControls::disableModelFade)
+				return Orig(objAcc);
+			return false;
+		}
+	};
 #endif
 
 } // namespace
@@ -126,6 +145,7 @@ namespace xenomods {
 	bool RenderingControls::skipFogRendering = false;
 	bool RenderingControls::skipDepthOfFieldRendering = false;
 	bool RenderingControls::enableAutoReduction = true;
+	bool RenderingControls::disableModelFade = false;
 
 	float RenderingControls::shadowStrength = 1.0;
 
@@ -171,6 +191,7 @@ namespace xenomods {
 #if !XENOMODS_CODENAME(bf3)
 	#if XENOMODS_OLD_ENGINE
 		ImGui::Checkbox("Skip particle+overlay rendering", &skipParticleRendering);
+		ImGui::Checkbox("Disable model fading", &disableModelFade);
 	#else
 		ImGui::Checkbox("Skip particle rendering", &skipParticleRendering);
 		ImGui::Checkbox("Skip overlay rendering", &skipOverlayRendering);
@@ -265,6 +286,8 @@ namespace xenomods {
 #if XENOMODS_OLD_ENGINE
 		StraightensYourXenoblade::HookAt("_ZN5layer12LayerObjFont17updateShaderParmsEPKNS_15LayerRenderViewERKNS_14LayerResMatrixERKNS_13LayerResColorE");
 		SkipParticleRendering::HookAt("_ZN5ptlib15ParticleManager4drawEPKNS_16DrDrawWorkInfoEFEib");
+		DisableFadeMode::HookAt("_ZN2gf8GfObjAcc19setRenderCameraFadeEb");
+		DisableFadeAlpha::HookAt("_ZNK2gf8GfObjAcc17isCameraFadeAllOKEv");
 #elif XENOMODS_CODENAME(bfsw)
 		SkipParticleRendering::HookAt("_ZN4xefb14CEParticlelist4drawEPNS_5CEResE");
 #endif

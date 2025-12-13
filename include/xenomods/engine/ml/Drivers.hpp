@@ -61,6 +61,14 @@ namespace ml {
 		void texStmUpdate();
 	};
 
+	class DrCalcMan {
+	   public:
+		void begin();
+		void end();
+		void renderEnd();
+		void shadowEnd();
+	};
+
 	class DrCalcStmListObj {
 	   public:
 		INSERT_PADDING_BYTES(0x10);
@@ -94,6 +102,17 @@ namespace ml {
 		void update();
 	};
 
+	class DrCalcViewWork {
+	   public:
+		void begin(int param_1);
+		void updateDitherMatrix();
+
+		static long unistatic_digher_val(float *param_1, bool param_2);
+		static long unistatic_dither_tmaa_val(float *param_1, bool param_2);
+		long unistatic_dither_matrix(float *param_1);
+		long unistatic_dither_param(float *param_1);
+	};
+
 	class DrFogMan {
 	   public:
 #if XENOMODS_OLD_ENGINE || XENOMODS_CODENAME(bfsw)
@@ -102,6 +121,21 @@ namespace ml {
 		INSERT_PADDING_BYTES(0xE8);
 #endif
 		bool isFogOn;
+	};
+
+	class DrMdoMat {
+	   public:
+		void setFlagWaveOn(bool on);
+	};
+
+	class DrMdoShdSet {
+	   public:
+		void setFlagWaveTexSet(uint param_1, int param_2);
+	};
+
+	class DrMdlObj {
+	   public:
+		bool isCamCheckResl() const;
 	};
 
 }

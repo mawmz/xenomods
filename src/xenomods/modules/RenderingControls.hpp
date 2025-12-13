@@ -15,6 +15,7 @@ namespace xenomods {
 		static bool skipFogRendering;
 		static bool skipDepthOfFieldRendering;
 		static bool enableAutoReduction;
+		static bool disableModelFade;
 
 		static float shadowStrength;
 

@@ -19,6 +19,10 @@ namespace gf {
 		}
 	};
 
+	struct GFOBJ_INFO {
+
+	};
+
 	struct GfComTransform {
 	   public:
 		mm::Vec3* getPosition() const;
@@ -40,19 +44,36 @@ namespace gf {
 		Type8
 	};
 
+	// unknown name
+	enum ObjectFlags : unsigned int {
+		Destroy = 0,
+		Clip = 2,
+		GPUClip = 3,
+		Rebuild = 6,
+		CameraFadeDisableForEvent = 11,
+		CameraFadeDisableForBattle = 12,
+		CameraFadeDisable = 13,
+		PartyObj = 18,
+		Updated = 19,
+		ToolMode = 24
+	};
+
 	class GfObjAcc {
 	   public:
 		GfObjAcc(GF_OBJ_HANDLE* handle);
 
 		ObjectType getType() const;
-
 		bool getObjPosRot(mm::Vec3& pos, float& rot);
+		float getAlphaCamera() const;
+
+		bool isCollideModelClip() const;
 	};
 
 	class GfObjUtil {
 	   public:
 		static void* getProperty(GF_OBJ_HANDLE* handle);
 		static char* getModelResourceName(GF_OBJ_HANDLE* handle);
+		static bool testFlag(GFOBJ_INFO* objInfo, unsigned int flag);
 	};
 
 	struct GfInitParamDriver { // size at least 0x1b0 (
