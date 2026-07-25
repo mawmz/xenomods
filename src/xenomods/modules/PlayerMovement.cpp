@@ -1,4 +1,5 @@
 #include "PlayerMovement.hpp"
+#include "CameraTools.hpp"
 #include "DebugStuff.hpp"
 
 #include "xenomods/ImGuiExtensions.hpp"
@@ -6,6 +7,7 @@
 #include "xenomods/engine/fw/UpdateInfo.hpp"
 #include "xenomods/engine/game/Controllers.hpp"
 #include "xenomods/engine/game/Utils.hpp"
+#include "xenomods/engine/gf/Data.hpp"
 #include "xenomods/engine/gf/Party.hpp"
 #include "xenomods/engine/gf/PlayerController.hpp"
 #include "xenomods/engine/mm/mtl/RTTI.hpp"
@@ -13,6 +15,24 @@
 #include "xenomods/stuff/utils/util.hpp"
 
 namespace {
+
+#if XENOMODS_CODENAME(bf2)
+	bool normalCameraRestorePending = false;
+
+	struct RestoreNormalCameraState :
+		skylaunch::hook::Trampoline<RestoreNormalCameraState> {
+		static void Hook(
+			gf::PlayerCamera* thisPointer,
+			const fw::UpdateInfo& updateInfo
+		) {
+			if(normalCameraRestorePending) {
+				thisPointer->resetLoad();
+				normalCameraRestorePending = false;
+			}
+			Orig(thisPointer, updateInfo);
+		}
+	};
+#endif
 
 #if XENOMODS_OLD_ENGINE
 	struct ApplyVelocityChanges : skylaunch::hook::Trampoline<ApplyVelocityChanges> {
@@ -336,6 +356,44 @@ namespace xenomods {
 					warp.velocity.z = thisone["velocity"][2].value_or(0.f);
 				}
 
+				if(thisone["cameraPosition"].type() == toml::node_type::array) {
+					warp.cameraPosition.x =
+						thisone["cameraPosition"][0].value_or(0.f);
+					warp.cameraPosition.y =
+						thisone["cameraPosition"][1].value_or(0.f);
+					warp.cameraPosition.z =
+						thisone["cameraPosition"][2].value_or(0.f);
+					warp.hasCameraPosition = true;
+				}
+
+#if XENOMODS_CODENAME(bf2)
+				if(
+					thisone["cameraYaw"].type()
+						== toml::node_type::floating_point
+					&& thisone["cameraPitch"].type()
+						== toml::node_type::floating_point
+					&& thisone["cameraHeight"].type()
+						== toml::node_type::floating_point
+					&& thisone["cameraDistance"].type()
+						== toml::node_type::floating_point
+				) {
+					warp.cameraYaw =
+						thisone["cameraYaw"].value_or(0.f);
+					warp.cameraPitch =
+						thisone["cameraPitch"].value_or(0.f);
+					warp.cameraHeight =
+						thisone["cameraHeight"].value_or(0.f);
+					warp.cameraDistance =
+						thisone["cameraDistance"].value_or(0.f);
+					warp.cameraSide = static_cast<unsigned char>(
+						thisone["cameraSide"].value_or(0)
+					);
+					warp.cameraFreeMode =
+						thisone["cameraFreeMode"].value_or(false);
+					warp.hasNormalCameraState = true;
+				}
+#endif
+
 				Warps.push_back(warp);
 			});
 
@@ -359,6 +417,29 @@ namespace xenomods {
 			thisone.emplace("position", toml::array { warp.position.x, warp.position.y, warp.position.z });
 			thisone.emplace("rotation", toml::array { warp.rotationEuler.x, warp.rotationEuler.y, warp.rotationEuler.z });
 			thisone.emplace("velocity", toml::array { warp.velocity.x, warp.velocity.y, warp.velocity.z });
+			if(warp.hasCameraPosition) {
+				thisone.emplace(
+					"cameraPosition",
+					toml::array {
+						warp.cameraPosition.x,
+						warp.cameraPosition.y,
+						warp.cameraPosition.z
+					}
+				);
+			}
+#if XENOMODS_CODENAME(bf2)
+			if(warp.hasNormalCameraState) {
+				thisone.emplace("cameraYaw", warp.cameraYaw);
+				thisone.emplace("cameraPitch", warp.cameraPitch);
+				thisone.emplace("cameraHeight", warp.cameraHeight);
+				thisone.emplace("cameraDistance", warp.cameraDistance);
+				thisone.emplace(
+					"cameraSide",
+					static_cast<unsigned int>(warp.cameraSide)
+				);
+				thisone.emplace("cameraFreeMode", warp.cameraFreeMode);
+			}
+#endif
 
 			allWarps.emplace_back(thisone);
 		}
@@ -418,6 +499,23 @@ namespace xenomods {
 			warp->rotation = *GetPartyRotation();
 		if(GetPartyVelocity() != nullptr)
 			warp->velocity = *GetPartyVelocity();
+		if(
+			detail::IsModuleRegistered(STRINGIFY(CameraTools))
+			&& CameraTools::HasCameraState
+		) {
+			warp->cameraPosition = CameraTools::CamMeta.pos;
+			warp->hasCameraPosition = true;
+		}
+#if XENOMODS_CODENAME(bf2)
+		warp->cameraYaw = gf::GfDataUtil::getCameraYaw();
+		warp->cameraPitch = gf::GfDataUtil::getCameraPitch();
+		warp->cameraHeight = gf::GfDataUtil::getCameraHeight();
+		warp->cameraDistance =
+			gf::GfDataUtil::getPlayerCameraDistance();
+		warp->cameraSide = gf::GfDataUtil::getCameraSide();
+		warp->cameraFreeMode = gf::GfDataUtil::isCameraFreeMode();
+		warp->hasNormalCameraState = true;
+#endif
 
 		warp->rotationEuler = glm::degrees(glm::eulerAngles(warp->rotation));
 
@@ -450,6 +548,19 @@ namespace xenomods {
 		if(normalized != zero)
 			SetPartyRotation(normalized); // can cause fun errors
 		SetPartyVelocity(warp->velocity);
+#if XENOMODS_CODENAME(bf2)
+		if(warp->hasNormalCameraState) {
+			gf::GfDataUtil::setCameraYaw(warp->cameraYaw);
+			gf::GfDataUtil::setCameraPitch(warp->cameraPitch);
+			gf::GfDataUtil::setCameraHeight(warp->cameraHeight);
+			gf::GfDataUtil::setPlayerCameraDistance(
+				warp->cameraDistance
+			);
+			gf::GfDataUtil::setCameraSide(warp->cameraSide);
+			gf::GfDataUtil::setCameraFreeMode(warp->cameraFreeMode);
+			normalCameraRestorePending = true;
+		}
+#endif
 
 		g_Logger->ToastInfo("warp", "Warped party to {}", warp->name);
 	}
@@ -503,6 +614,13 @@ namespace xenomods {
 		if(ImGui::DragFloat3("Rotation", reinterpret_cast<float*>(&warp->rotationEuler)))
 			warp->rotation = glm::quat(glm::radians(warp->rotationEuler));
 		ImGui::DragFloat3("Velocity", reinterpret_cast<float*>(&warp->velocity));
+		if(warp->hasCameraPosition)
+			ImGui::DragFloat3(
+				"Camera Position",
+				reinterpret_cast<float*>(&warp->cameraPosition)
+			);
+		else
+			ImGui::TextDisabled("Camera Position: not saved");
 
 		if(ImGui::Button("Go To Warp"))
 			PlayerMovement::GoToWarp(warp);
@@ -579,6 +697,11 @@ namespace xenomods {
 		DisableStateUtilFallDamage::HookAt("_ZN2gf2pc9StateUtil20setFallDamageDisableERNS_15GfComBehaviorPcEb");
 
 		CorrectCameraTarget::HookAt("_ZN2gf18PlayerCameraTarget15writeTargetInfoEv");
+#if XENOMODS_CODENAME(bf2)
+		RestoreNormalCameraState::HookAt(
+			"_ZN2gf12PlayerCamera6updateERKN2fw10UpdateInfoE"
+		);
+#endif
 #elif XENOMODS_CODENAME(bfsw)
 		ApplyVelocityChanges::HookAt(&game::CharacterController::applyMoveVec);
 		DisableFallDamage::HookAt(&game::CharacterController::getFallHeight);

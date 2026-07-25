@@ -47,6 +47,7 @@ namespace xenomods {
 			float fov;
 		};
 		static CameraMeta CamMeta;
+		static bool HasCameraState;
 
 		static void UpdateMeta();
 

@@ -44,6 +44,24 @@ namespace event {
 		};
 
 		gf::GfEvtModel* setupModel(MODEL_TYPE modelType, unsigned int id, const OPTION&);
+
+		gf::GF_OBJ_HANDLE* getObjHandle() const {
+			const auto bytes = reinterpret_cast<const std::uint8_t*>(this);
+			return *reinterpret_cast<gf::GF_OBJ_HANDLE* const*>(bytes + 0x120);
+		}
+
+		unsigned int getPendingResourceMask() const {
+			const auto bytes = reinterpret_cast<const std::uint8_t*>(this);
+			return *reinterpret_cast<const unsigned int*>(bytes + 0x8) & 0xC;
+		}
+	};
+
+	class ModelManager {
+	   public:
+		ModelManager();
+
+		ModelObj* createModel(const char* resourcePath, bool stream, unsigned int layer, int owner);
+		void destroyModel(ModelObj* model, int owner);
 	};
 
 } // namespace event

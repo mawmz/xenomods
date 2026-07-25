@@ -18,6 +18,17 @@ namespace xenomods {
 			glm::quat rotation {};
 			glm::vec3 rotationEuler {}; // not serialized
 			glm::vec3 velocity {};
+			glm::vec3 cameraPosition {};
+			bool hasCameraPosition = false;
+#if XENOMODS_CODENAME(bf2)
+			float cameraYaw {};
+			float cameraPitch {};
+			float cameraHeight {};
+			float cameraDistance {};
+			unsigned char cameraSide {};
+			bool cameraFreeMode = false;
+			bool hasNormalCameraState = false;
+#endif
 		};
 		static std::vector<WarpData> Warps;
 

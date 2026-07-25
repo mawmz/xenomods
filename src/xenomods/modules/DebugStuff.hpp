@@ -11,10 +11,20 @@ namespace xenomods {
 		static bool accessClosedLandmarks;
 		static bool pauseEnable;
 		static bool enableMemoryDebug;
+		static bool repeatTutorialFlag;
+		static bool pauseTutorialRepeatUntilExit;
+		static bool renderTutorialTrigger;
+		static bool renderCutsceneTrigger;
+		static bool traceLocalGameFlags;
+		static bool traceTutorialCallSites;
 
 		static std::int8_t pauseStepForward;
 		static int tempInt;
 		static int bgmTrackIndex;
+		static int tutorialFlagId;
+		static int tutorialFlagBitSize;
+		static int lastChangedLocalFlagId;
+		static int lastChangedLocalFlagBitSize;
 
 		static unsigned short GetMapId();
 		static std::string GetMapName(int id);
@@ -30,12 +40,16 @@ namespace xenomods {
 		static void MemoryDebugRendering();
 
 		static void MenuSection();
+		static void TutorialMenuSection();
+		static void TutorialToolsMenuSection();
+		static void CutsceneTriggerToolsMenuSection();
 
 		void Initialize() override;
 		bool NeedsUpdate() const override {
 			return true;
 		}
 		void Update(fw::UpdateInfo* updateInfo) override;
+		void OnMapChange(unsigned short mapId) override;
 	};
 
 } // namespace xenomods

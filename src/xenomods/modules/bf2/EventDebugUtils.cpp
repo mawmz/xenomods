@@ -74,6 +74,13 @@ namespace {
 			eventName.resize(10);
 		uint eventId = gf::GfDataEvent::getEventID(eventName.c_str());
 
+		if(xenomods::DebugStuff::traceTutorialCallSites) {
+			xenomods::g_Logger->LogInfo("[Tutorial event trace] Starting event {} (id {})", evtName, eventId);
+			const auto stack = dbgutil::getStackTrace();
+			for(std::size_t i = 1; i < 6 && stack[i] != 0; i++)
+				xenomods::g_Logger->LogInfo("[Tutorial event trace]   stack[{}] {}", i, dbgutil::getSymbol(stack[i]));
+		}
+
 		if(eventId > 0)
 			xenomods::g_Logger->LogDebug("Creating event {} (id {})", evtName, eventId);
 		else
@@ -218,6 +225,23 @@ namespace xenomods {
 		if(modules != nullptr) {
 			auto section = modules->RegisterSection(STRINGIFY(EventDebugUtils), "Event Debug");
 			section->RegisterRenderCallback(&MenuSection);
+
+			auto newFeatureDebug = modules->RegisterSection("newFeatureDebug", "NEW Feature Debug");
+			newFeatureDebug->RegisterRenderCallback(&DebugStuff::TutorialMenuSection);
+
+			auto tutorialTools = modules->RegisterSection(
+				"tutorialTools",
+				"Render tutorial triggers"
+			);
+			tutorialTools->RegisterRenderCallback(&DebugStuff::TutorialToolsMenuSection);
+
+			auto cutsceneTriggerTools = modules->RegisterSection(
+				"cutsceneTriggerTools",
+				"Render cutscene triggers"
+			);
+			cutsceneTriggerTools->RegisterRenderCallback(
+				&DebugStuff::CutsceneTriggerToolsMenuSection
+			);
 		}
 	}
 

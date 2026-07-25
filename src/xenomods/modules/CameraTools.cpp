@@ -107,6 +107,7 @@ struct CopyCurrentCameraState : skylaunch::hook::Trampoline<CopyCurrentCameraSta
 				xenomods::CameraTools::CamState.matrix = this_pointer->AttrTransformPtr->viewMatInverse;
 				xenomods::CameraTools::CamState.fov = this_pointer->AttrTransformPtr->fov;
 				xenomods::CameraTools::UpdateMeta();
+				xenomods::CameraTools::HasCameraState = true;
 			}
 		}
 	}
@@ -135,6 +136,7 @@ namespace xenomods {
 	};
 
 	CameraTools::CameraMeta CameraTools::CamMeta = {};
+	bool CameraTools::HasCameraState = false;
 
 	glm::vec3 lastPlayerPos = {};
 	glm::vec3 relativePlayerDelta = {};

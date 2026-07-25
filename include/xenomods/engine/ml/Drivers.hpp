@@ -7,6 +7,10 @@
 #include "xenomods/engine/mm/mtl/FixStr.hpp"
 #include "xenomods/engine/mm/mtl/PtrSingleton.hpp"
 
+namespace grlib {
+	class CGLibTextureBuffer;
+}
+
 namespace ml {
 
 	class Scn;
@@ -58,6 +62,7 @@ namespace ml {
 
 	class DrResMdoTexList {
 	   public:
+		const char* getTexName(unsigned int index);
 		void texStmUpdate();
 	};
 
@@ -136,6 +141,19 @@ namespace ml {
 	class DrMdlObj {
 	   public:
 		bool isCamCheckResl() const;
+		bool getModelTexture(
+			int materialIndex,
+			const grlib::CGLibTextureBuffer** texture
+		);
+		int getTextureResMax() const;
+		void getNowTextureRes(
+			grlib::CGLibTextureBuffer**& textures,
+			int& count
+		);
+		void setTextureRes(
+			int index,
+			grlib::CGLibTextureBuffer* texture
+		);
 	};
 
 }

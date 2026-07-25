@@ -114,6 +114,14 @@ namespace mm {
 
 	static_assert(sizeof(Col4) == sizeof(float) * 4, "[mm::Col4] size wrong!");
 
+	struct Col3 {
+		float r;
+		float g;
+		float b;
+	};
+
+	static_assert(sizeof(Col3) == sizeof(float) * 3, "[mm::Col3] size wrong!");
+
 } // namespace mm
 
 /**

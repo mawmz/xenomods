@@ -65,7 +65,9 @@ namespace xenomods {
 				io.Fonts->AddFontFromFileTTF(path.c_str(), thingy.second, nullptr, &ranges[0]);
 			}
 		}
-		io.Fonts->AddFontDefault();
+		// Match Dear ImGui's classic look: use the embedded 13 px ProggyClean
+		// font at startup while keeping configured fonts available in the menu.
+		io.FontDefault = io.Fonts->AddFontDefault();
 
 		g_Menu->SetTheme(GetState().config.menuTheme);
 
@@ -224,6 +226,8 @@ namespace xenomods {
 		if (curTheme == Theme::Auto) {
 #if XENOMODS_CODENAME(bfsw)
 			curTheme = Theme::Titans;
+#elif XENOMODS_CODENAME(bf2)
+			curTheme = Theme::DougBinks;
 #elif XENOMODS_OLD_ENGINE
 			curTheme = Theme::Alrest;
 #elif XENOMODS_CODENAME(bf3)
@@ -238,6 +242,7 @@ namespace xenomods {
 			case Theme::ImGuiDark: ImGui::StyleColorsDark(); break;
 			case Theme::ImGuiLight: ImGui::StyleColorsLight(); break;
 			case Theme::ImGuiClassic: ImGui::StyleColorsClassic(); break;
+			case Theme::DougBinks: ImGuiStyleColorsDougBinks(); break;
 			default: ImGui::StyleColorsDark(); return Theme::ImGuiDark;
 		}
 

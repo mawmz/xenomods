@@ -46,6 +46,24 @@ namespace gf {
 		static unsigned char* getFP(unsigned int idx);
 	};
 
+#if XENOMODS_CODENAME(bf2)
+	class GfDataUtil {
+	   public:
+		static float getCameraYaw();
+		static void setCameraYaw(float yaw);
+		static float getCameraPitch();
+		static void setCameraPitch(float pitch);
+		static float getCameraHeight();
+		static void setCameraHeight(float height);
+		static float getPlayerCameraDistance();
+		static void setPlayerCameraDistance(float distance);
+		static unsigned char getCameraSide();
+		static void setCameraSide(unsigned char side);
+		static bool isCameraFreeMode();
+		static void setCameraFreeMode(bool enabled);
+	};
+#endif
+
 	class GfMenuBdat {
 	   public:
 		static unsigned char* getItemDataFP(unsigned char itemType, unsigned short itemId);

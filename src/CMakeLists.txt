@@ -140,15 +140,61 @@ target_compile_definitions(xenomods PUBLIC
 # NSO output.
 add_nso_target(xenomods)
 
+# XC2 tutorial-trigger visualization asset. Keep LayeredFS files in their own
+# deployment directory beside build/exefs; both directories are required.
+list(FIND XENOMODS_MULTIBUILD_LIST "bf2" XENOMODS_BF2_BUILD_INDEX)
+if(NOT XENOMODS_BF2_BUILD_INDEX EQUAL -1)
+	add_custom_command(TARGET xenomods
+			POST_BUILD
+			COMMAND ${CMAKE_COMMAND} -E make_directory
+				${PROJECT_BINARY_DIR}/romfs/model/oj
+			COMMAND ${CMAKE_COMMAND} -E rm -f
+				${PROJECT_BINARY_DIR}/romfs/model/oj/oj900402.arc
+				${PROJECT_BINARY_DIR}/romfs/model/oj/oj900402.wimdo
+				${PROJECT_BINARY_DIR}/romfs/model/oj/oj900402.wismt
+				${PROJECT_BINARY_DIR}/romfs/model/oj/oj900403.arc
+				${PROJECT_BINARY_DIR}/romfs/model/oj/oj900403.wimdo
+				${PROJECT_BINARY_DIR}/romfs/model/oj/oj900403.wismt
+			COMMAND ${CMAKE_COMMAND} -E copy_if_different
+				${PROJECT_SOURCE_DIR}/assets/tutorial_trigger/romfs/model/oj/oj900401.arc
+				${PROJECT_SOURCE_DIR}/assets/tutorial_trigger/romfs/model/oj/oj900401.wimdo
+				${PROJECT_SOURCE_DIR}/assets/tutorial_trigger/romfs/model/oj/oj900401.wismt
+				${PROJECT_SOURCE_DIR}/assets/tutorial_trigger/romfs/model/oj/oj700009.arc
+				${PROJECT_SOURCE_DIR}/assets/tutorial_trigger/romfs/model/oj/oj700009.wimdo
+				${PROJECT_SOURCE_DIR}/assets/tutorial_trigger/romfs/model/oj/oj700009.wismt
+				${PROJECT_BINARY_DIR}/romfs/model/oj
+			VERBATIM
+			COMMENT "Refreshing bf2 tutorial-trigger romfs files"
+			)
+endif()
+
 # "multibuilds" are just one specific build being used multiple times
 # we want to loop through the list of them and do all the npdm stuff/ftp uploading per codename
 
+list(LENGTH XENOMODS_MULTIBUILD_LIST XENOMODS_MULTIBUILD_COUNT)
 foreach(THIS_CODENAME ${XENOMODS_MULTIBUILD_LIST})
 	if (NOT EXISTS ${PROJECT_BINARY_DIR}/${THIS_CODENAME}.npdm)
 		# NPDM output.
 		add_npdm(xenomods ${PROJECT_SOURCE_DIR}/npdm/${THIS_CODENAME}.json ${THIS_CODENAME}-unpatched)
 		patch_npdm(${THIS_CODENAME}-unpatched ${THIS_CODENAME})
 	endif()
+
+	# Keep a ready-to-copy exefs folder refreshed after every successful build.
+	# Single-game presets use build/exefs. Multibuilds get one folder per game.
+	if(XENOMODS_MULTIBUILD_COUNT EQUAL 1)
+		set(XENOMODS_EXEFS_DIR ${PROJECT_BINARY_DIR}/exefs)
+	else()
+		set(XENOMODS_EXEFS_DIR ${PROJECT_BINARY_DIR}/${THIS_CODENAME}-exefs)
+	endif()
+
+	add_custom_command(TARGET xenomods
+			POST_BUILD
+			COMMAND ${CMAKE_COMMAND} -E make_directory ${XENOMODS_EXEFS_DIR}
+			COMMAND ${CMAKE_COMMAND} -E copy_if_different ${PROJECT_BINARY_DIR}/xenomods.nso ${XENOMODS_EXEFS_DIR}/subsdk9
+			COMMAND ${CMAKE_COMMAND} -E copy_if_different ${PROJECT_BINARY_DIR}/${THIS_CODENAME}.npdm ${XENOMODS_EXEFS_DIR}/main.npdm
+			VERBATIM
+			COMMENT "Refreshing ${THIS_CODENAME} exefs deployment folder"
+			)
 endforeach()
 
 # FTP transfer

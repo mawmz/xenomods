@@ -6,6 +6,13 @@
 
 namespace gf {
 
+#if XENOMODS_CODENAME(bf2)
+	class PlayerCamera {
+	   public:
+		void resetLoad();
+	};
+#endif
+
 	class GfMoveJumpControler {
 	   public:
 		struct Packet { // we only care abt stuff here

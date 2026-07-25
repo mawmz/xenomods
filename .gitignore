@@ -9,6 +9,9 @@ cmake-build-*/
 # generic build directory
 build/
 
+# dev tools
+tools/
+
 # some just in case stuff
 *.elf
 *.nso
