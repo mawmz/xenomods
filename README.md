@@ -1,5 +1,7 @@
 ## Xenomods [![xenomods CI](https://github.com/BlockBuilder57/xenomods/actions/workflows/ci.yml/badge.svg)](https://github.com/BlockBuilder57/xenomods/actions/workflows/ci.yml)
 
+# You are currently viewing a fork made by mawmz, meant for Xenoblade 2 TASing.
+
 Some mod code by [modeco80](https://github.com/modeco80) and [BlockBuilder57](https://github.com/BlockBuilder57) for the Xenoblade games on Switch.
 
 Initially based off [Ether Flow](https://github.com/3096/ether) by Frank ([3096](https://github.com/3096)). As such, this includes a custom fork of [Skyline](https://github.com/skyline-dev/skyline/), which has since been modified to have an architecture similar to [exlaunch](https://github.com/shadowninja108/exlaunch).
