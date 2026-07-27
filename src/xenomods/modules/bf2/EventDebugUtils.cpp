@@ -242,6 +242,14 @@ namespace xenomods {
 			cutsceneTriggerTools->RegisterRenderCallback(
 				&DebugStuff::CutsceneTriggerToolsMenuSection
 			);
+
+			auto landmarkTriggerTools = modules->RegisterSection(
+				"landmarkTriggerTools",
+				"Render landmark triggers"
+			);
+			landmarkTriggerTools->RegisterRenderCallback(
+				&DebugStuff::LandmarkTriggerToolsMenuSection
+			);
 		}
 	}
 

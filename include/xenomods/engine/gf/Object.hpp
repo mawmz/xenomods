@@ -104,6 +104,7 @@ namespace gf {
 
 	class GfObjUtil {
 	   public:
+		static void* getObj(GF_OBJ_HANDLE* handle);
 		static void* getProperty(GF_OBJ_HANDLE* handle);
 		static char* getModelResourceName(GF_OBJ_HANDLE* handle);
 		static GfComModel* getComModel(GF_OBJ_HANDLE* handle);

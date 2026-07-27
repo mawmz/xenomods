@@ -3,6 +3,7 @@
 #include "DebugStuff.hpp"
 
 #include "xenomods/ImGuiExtensions.hpp"
+#include "xenomods/engine/fw/Collision.hpp"
 #include "xenomods/engine/fw/Document.hpp"
 #include "xenomods/engine/fw/UpdateInfo.hpp"
 #include "xenomods/engine/game/Controllers.hpp"
@@ -15,6 +16,16 @@
 #include "xenomods/stuff/utils/util.hpp"
 
 namespace {
+
+#if XENOMODS_OLD_ENGINE
+	glm::vec3 measuredPlayerVelocity {};
+	glm::vec3 previousPlayerPosition {};
+	bool hasPreviousPlayerPosition = false;
+	bool playerMovementStateValid = false;
+	bool playerWallContactValid = false;
+	bool playerAirborne = false;
+	bool playerWallContact = false;
+#endif
 
 #if XENOMODS_CODENAME(bf2)
 	bool normalCameraRestorePending = false;
@@ -76,6 +87,8 @@ namespace {
 	struct CorrectCameraTarget : skylaunch::hook::Trampoline<CorrectCameraTarget> {
 		static void Hook(gf::PlayerCameraTarget* this_pointer) {
 			Orig(this_pointer);
+			playerAirborne = this_pointer->inAir;
+			playerMovementStateValid = true;
 			if(xenomods::PlayerMovement::moonJump) {
 				// makes the game always take the on ground path in gf::PlayerCamera::updateTracking
 				this_pointer->inAir = false;
@@ -140,6 +153,8 @@ namespace xenomods {
 	bool PlayerMovement::ShowWarpsWindow = false;
 	bool PlayerMovement::ShowAllWarps = false;
 	bool PlayerMovement::ShowWarpsOnMap = false;
+	bool PlayerMovement::ShowPlayerTelemetry = false;
+	bool PlayerMovement::PersistPlayerTelemetry = false;
 
 	glm::vec3* PlayerMovement::GetPartyPosition() {
 #if XENOMODS_OLD_ENGINE
@@ -228,29 +243,8 @@ namespace xenomods {
 
 	glm::vec3* PlayerMovement::GetPartyVelocity() {
 #if XENOMODS_OLD_ENGINE
-		// TODO
-		/*gf::GF_OBJ_HANDLE handle = gf::GfGameParty::getLeader();
-		if (handle.IsValid()) {
-			g_Logger->LogInfo("Got handle - {}", reinterpret_cast<unsigned long>(handle.Ptr()));
-
-			auto acc = gf::GfObjAcc(handle.Ptr());
-			g_Logger->LogInfo("Supposed type: {}", (int)acc.getType());
-
-			void* thing = gf::GfObjUtil::getProperty(handle.Ptr());
-			g_Logger->LogInfo("What's the thing? {}", thing);
-			auto* behavior = reinterpret_cast<gf::GfComPropertyPc*>(thing);
-			if (behavior != nullptr) {
-				g_Logger->LogInfo("where is its rtti? {}", reinterpret_cast<void*>(behavior->getRTTI()));
-				if (behavior->getRTTI() != nullptr) {
-					g_Logger->LogInfo("rtti says: {}", behavior->getRTTI()->szName);
-					if (behavior->getRTTI()->isKindOf(&gf::GfComPropertyPc::m_rtti)) {
-						g_Logger->LogInfo("Wario");
-					}
-				}
-				else
-					g_Logger->LogInfo("uh oh, no RTTI");
-			}
-		}*/
+		if(hasPreviousPlayerPosition)
+			return &measuredPlayerVelocity;
 #elif XENOMODS_CODENAME(bfsw)
 		if(DocumentPtr == nullptr) {
 			g_Logger->LogError("can't get party position cause no doc ptr!");
@@ -595,6 +589,44 @@ namespace xenomods {
 
 	void PlayerMovement::MenuSection() {
 		ImGui::MenuItem("Show Warps Window", "", &ShowWarpsWindow);
+		if(ImGui::Checkbox("Player telemetry overlay", &ShowPlayerTelemetry)) {
+			if(PersistPlayerTelemetry) {
+				const auto path = fmt::format(
+					XENOMODS_CONFIG_PATH "/{}/playerTelemetry.toml",
+					XENOMODS_CODENAME_STR
+				);
+				const auto out = fmt::format(
+					"persist = true\nvisible = {}\n",
+					ShowPlayerTelemetry
+				);
+				if(NnFile::Preallocate(path, out.size())) {
+					NnFile file(path, nn::fs::OpenMode_Write);
+					file.Write(out.c_str(), out.size());
+					file.Flush();
+				}
+			}
+		}
+		if(
+			ImGui::Checkbox(
+				"Remember telemetry setting",
+				&PersistPlayerTelemetry
+			)
+		) {
+			const auto path = fmt::format(
+				XENOMODS_CONFIG_PATH "/{}/playerTelemetry.toml",
+				XENOMODS_CODENAME_STR
+			);
+			const auto out = fmt::format(
+				"persist = {}\nvisible = {}\n",
+				PersistPlayerTelemetry,
+				ShowPlayerTelemetry
+			);
+			if(NnFile::Preallocate(path, out.size())) {
+				NnFile file(path, nn::fs::OpenMode_Write);
+				file.Write(out.c_str(), out.size());
+				file.Flush();
+			}
+		}
 		ImGui::Checkbox("Disable fall damage", &disableFallDamage);
 		ImGui::PushItemWidth(150.f);
 		imguiext::InputFloatExt("Movement speed multiplier", &movementSpeedMult, 1.f, 5.f, 2.f, "%.2f");
@@ -686,9 +718,107 @@ namespace xenomods {
 		ImGui::End();
 	}
 
+	void PlayerMovement::PlayerTelemetryOverlay() {
+		if(!ShowPlayerTelemetry)
+			return;
+
+		ImGui::SetNextWindowPos(ImVec2(10.0f, 40.0f), ImGuiCond_FirstUseEver);
+		ImGui::SetNextWindowBgAlpha(0.65f);
+		const ImGuiWindowFlags flags =
+			ImGuiWindowFlags_AlwaysAutoResize
+				| ImGuiWindowFlags_NoCollapse
+				| ImGuiWindowFlags_NoFocusOnAppearing;
+		if(!ImGui::Begin("Player Telemetry", &ShowPlayerTelemetry, flags)) {
+			ImGui::End();
+			return;
+		}
+
+		const auto position = GetPartyPosition();
+		const auto velocity = GetPartyVelocity();
+		const auto rotation = GetPartyRotation();
+
+		if(position != nullptr) {
+			ImGui::Text(
+				"Pos    X %9.2f  Y %9.2f  Z %9.2f",
+				position->x,
+				position->y,
+				position->z
+			);
+		} else {
+			ImGui::TextUnformatted("Pos    unavailable");
+		}
+
+		if(velocity != nullptr) {
+			const float horizontalSpeed =
+				glm::length(glm::vec2(velocity->x, velocity->z));
+			const float totalSpeed = glm::length(*velocity);
+			ImGui::Text(
+				"Vel    X %9.2f  Y %9.2f  Z %9.2f",
+				velocity->x,
+				velocity->y,
+				velocity->z
+			);
+			ImGui::Text(
+				"Speed  %9.2f    Horizontal %9.2f",
+				totalSpeed,
+				horizontalSpeed
+			);
+		} else {
+			ImGui::TextUnformatted("Vel    unavailable");
+			ImGui::TextUnformatted("Speed  unavailable");
+		}
+
+		if(rotation != nullptr) {
+			const glm::vec3 euler =
+				glm::degrees(glm::eulerAngles(glm::normalize(*rotation)));
+			ImGui::Text("Facing %9.2f deg", euler.y);
+		} else {
+			ImGui::TextUnformatted("Facing unavailable");
+		}
+
+#if XENOMODS_OLD_ENGINE
+		if(playerMovementStateValid) {
+			ImGui::Text(
+				"State  %s",
+				playerAirborne ? "Airborne" : "Grounded"
+			);
+		} else {
+			ImGui::TextUnformatted("State  unavailable");
+		}
+		if(playerWallContactValid) {
+			ImGui::Text(
+				"Wall contact  %s",
+				playerWallContact ? "Yes" : "No"
+			);
+		} else {
+			ImGui::TextUnformatted("Wall contact  unavailable");
+		}
+#endif
+
+		ImGui::End();
+	}
+
 	void PlayerMovement::Initialize() {
 		UpdatableModule::Initialize();
 		g_Logger->LogDebug("Setting up player movement hooks...");
+
+#if !XENOMODS_CODENAME(bf3)
+		{
+			const auto path = fmt::format(
+				XENOMODS_CONFIG_PATH "/{}/playerTelemetry.toml",
+				XENOMODS_CODENAME_STR
+			);
+			const toml::parse_result settings = toml::parse_file(path);
+			if(settings) {
+				const auto& table = settings.table();
+				PersistPlayerTelemetry =
+					table["persist"].value_or(false);
+				if(PersistPlayerTelemetry)
+					ShowPlayerTelemetry =
+						table["visible"].value_or(false);
+			}
+		}
+#endif
 
 #if XENOMODS_OLD_ENGINE
 		ApplyVelocityChanges::HookAt("_ZN2gf15GfComBehaviorPc19integrateMoveNormalERKN2fw10UpdateInfoERNS_15GfComPropertyPcE");
@@ -721,11 +851,70 @@ namespace xenomods {
 		}
 
 		g_Menu->RegisterRenderCallback(&MenuWarps, true);
+		g_Menu->RegisterRenderCallback(&PlayerTelemetryOverlay, true);
 #endif
 	}
 
 	void PlayerMovement::Update(fw::UpdateInfo* updateInfo) {
 		moonJump = HidInput::GetPlayer(1)->InputHeld(Keybind::MOONJUMP);
+
+#if XENOMODS_OLD_ENGINE
+		const auto position = GetPartyPosition();
+		if(position != nullptr) {
+			if(
+				hasPreviousPlayerPosition
+				&& updateInfo != nullptr
+				&& updateInfo->updateDelta > 0.000001f
+			) {
+				measuredPlayerVelocity =
+					(*position - previousPlayerPosition)
+					/ updateInfo->updateDelta;
+			} else {
+				measuredPlayerVelocity = {};
+			}
+			previousPlayerPosition = *position;
+			hasPreviousPlayerPosition = true;
+		} else {
+			measuredPlayerVelocity = {};
+			hasPreviousPlayerPosition = false;
+			playerMovementStateValid = false;
+		}
+
+		playerWallContact = false;
+		playerWallContactValid = false;
+		auto leader = gf::GfGameParty::getLeader();
+		if(
+			leader != nullptr
+			&& leader != reinterpret_cast<gf::GF_OBJ_HANDLE*>(-1)
+		) {
+			auto object = static_cast<std::uint8_t*>(
+				gf::GfObjUtil::getObj(leader)
+			);
+			if(object != nullptr) {
+				// XC2 BattleCharacter::ExternalForceProc resolves the
+				// character collision object through these two members:
+				// object + 0x58 -> collision component;
+				// component + 0x18 -> slot containing fw::ColiObject*.
+				auto component = *reinterpret_cast<std::uint8_t**>(
+					object + 0x58
+				);
+				if(component != nullptr) {
+					auto collisionSlot =
+						*reinterpret_cast<fw::ColiObject***>(
+							component + 0x18
+						);
+					if(
+						collisionSlot != nullptr
+						&& *collisionSlot != nullptr
+					) {
+						playerWallContact =
+							(*collisionSlot)->isContactWall();
+						playerWallContactValid = true;
+					}
+				}
+			}
+		}
+#endif
 
 #if !XENOMODS_CODENAME(bf3)
 		if(ShowWarpsOnMap) {
@@ -759,6 +948,13 @@ namespace xenomods {
 	}
 
 	void PlayerMovement::OnMapChange(unsigned short mapId) {
+#if XENOMODS_OLD_ENGINE
+		measuredPlayerVelocity = {};
+		hasPreviousPlayerPosition = false;
+		playerMovementStateValid = false;
+		playerWallContactValid = false;
+#endif
+
 		if(detail::IsModuleRegistered(STRINGIFY(DebugStuff)))
 			cacheMapName = DebugStuff::GetMapName(mapId);
 

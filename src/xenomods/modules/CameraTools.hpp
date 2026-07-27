@@ -18,6 +18,7 @@ namespace xenomods {
 			};
 
 			bool freecamOn;
+			bool cameraUnlockOn;
 			bool relativeToPlayer;
 			MoveAxis moveAxis;
 			MoveAxis comboMoveAxis;
@@ -29,6 +30,13 @@ namespace xenomods {
 			bool enableTargeting;
 			bool targetFollowPlayer;
 			glm::vec3 targetPos;
+
+			float unlockYaw;
+			float unlockPitch;
+			float unlockDistance;
+			float unlockTargetHeight;
+			float unlockRotateSpeed;
+			float unlockZoomSpeed;
 		};
 		static FreecamSettings Settings;
 
@@ -37,6 +45,11 @@ namespace xenomods {
 			float fov;
 		};
 		static CameraState CamState;
+		static CameraState VisualCamState;
+		static glm::vec3 NormalCamTarget;
+		static glm::vec3 VisualCamTarget;
+		static glm::vec3 UnlockLastPlayerPosition;
+		static bool HasNormalCamTarget;
 
 		struct CameraMeta {
 			glm::vec3 pos;

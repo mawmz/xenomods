@@ -15,6 +15,7 @@ namespace xenomods {
 		static bool pauseTutorialRepeatUntilExit;
 		static bool renderTutorialTrigger;
 		static bool renderCutsceneTrigger;
+		static bool renderLandmarkTrigger;
 		static bool traceLocalGameFlags;
 		static bool traceTutorialCallSites;
 
@@ -35,6 +36,7 @@ namespace xenomods {
 		static void DoMapJump(int mapjumpId);
 		static void PlaySE(unsigned int soundEffect);
 		static void ReturnTitle(unsigned int slot = -1);
+		static void ReloadSave();
 
 		static void UpdateDebugRendering();
 		static void MemoryDebugRendering();
@@ -43,6 +45,7 @@ namespace xenomods {
 		static void TutorialMenuSection();
 		static void TutorialToolsMenuSection();
 		static void CutsceneTriggerToolsMenuSection();
+		static void LandmarkTriggerToolsMenuSection();
 
 		void Initialize() override;
 		bool NeedsUpdate() const override {

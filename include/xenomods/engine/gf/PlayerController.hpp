@@ -65,7 +65,10 @@ namespace gf {
 		INSERT_PADDING_BYTES(0x8);
 		mm::Vec3 velocityWish;
 		mm::Vec3 velocityActual;
-		INSERT_PADDING_BYTES(0x288);
+		// XC2 2.1.0 reads the movement-state byte at property + 0x110.
+		// The previous 0x288 padding placed this field at 0x320, causing
+		// telemetry to interpret unrelated memory as movement flags.
+		INSERT_PADDING_BYTES(0x78);
 		unsigned int flags;
 
 		static mm::mtl::RTTI m_rtti;

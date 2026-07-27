@@ -83,12 +83,45 @@ namespace {
 			Orig(this_pointer, updateInfo);
 #endif
 
-	if(xenomods::CameraTools::Settings.freecamOn && this_pointer->objCam != nullptr) {
+	if(
+		xenomods::CameraTools::Settings.freecamOn
+		&& this_pointer->objCam != nullptr
+	) {
 		this_pointer->objCam->AttrTransformPtr->fov = xenomods::CameraTools::CamState.fov;
 #if !XENOMODS_CODENAME(bf3)
 		this_pointer->objCam->updateFovNearFar();
 #endif
 	}
+
+#if !XENOMODS_CODENAME(bf3)
+	if(
+		xenomods::CameraTools::Settings.cameraUnlockOn
+		&& this_pointer->objCam != nullptr
+		&& this_pointer->objCam->AttrTransformPtr != nullptr
+		&& this_pointer->objCam->ScnPtr != nullptr
+		&& this_pointer->objCam
+			== this_pointer->objCam->ScnPtr->getCam(-1)
+	) {
+		// CameraLayer and its fw::Camera objects remain untouched. Movement
+		// therefore keeps XC2's P1-controlled camera basis. Only the final
+		// scene camera shown by the renderer receives the P2 visual matrix.
+		xenomods::CameraTools::CamState.matrix =
+			this_pointer->objCam->AttrTransformPtr->viewMatInverse;
+		xenomods::CameraTools::CamState.fov =
+			this_pointer->objCam->AttrTransformPtr->fov;
+		xenomods::CameraTools::NormalCamTarget =
+			this_pointer->objCam->AttrTransformPtr->target;
+		xenomods::CameraTools::HasNormalCamTarget = true;
+		xenomods::CameraTools::UpdateMeta();
+		xenomods::CameraTools::HasCameraState = true;
+
+		this_pointer->objCam->setViewMatrix(
+			glm::inverse(static_cast<const glm::mat4&>(
+				xenomods::CameraTools::VisualCamState.matrix
+			))
+		);
+	}
+#endif
 } // namespace
 }
 ;
@@ -102,10 +135,19 @@ struct CopyCurrentCameraState : skylaunch::hook::Trampoline<CopyCurrentCameraSta
 #else
 			if(this_pointer->AttrTransformPtr != nullptr) {
 #endif
-			if(!xenomods::CameraTools::Settings.freecamOn) {
-				// read state from current camera
-				xenomods::CameraTools::CamState.matrix = this_pointer->AttrTransformPtr->viewMatInverse;
-				xenomods::CameraTools::CamState.fov = this_pointer->AttrTransformPtr->fov;
+			if(
+				!xenomods::CameraTools::Settings.freecamOn
+				&& !xenomods::CameraTools::Settings.cameraUnlockOn
+			) {
+				// CamState and its menu values always follow XC2's normal P1
+				// camera. Camera unlock has a separate VisualCamState.
+				xenomods::CameraTools::CamState.matrix =
+					this_pointer->AttrTransformPtr->viewMatInverse;
+				xenomods::CameraTools::CamState.fov =
+					this_pointer->AttrTransformPtr->fov;
+				xenomods::CameraTools::NormalCamTarget =
+					this_pointer->AttrTransformPtr->target;
+				xenomods::CameraTools::HasNormalCamTarget = true;
 				xenomods::CameraTools::UpdateMeta();
 				xenomods::CameraTools::HasCameraState = true;
 			}
@@ -119,6 +161,7 @@ namespace xenomods {
 
 	CameraTools::FreecamSettings CameraTools::Settings = {
 		.freecamOn = false,
+		.cameraUnlockOn = false,
 		.relativeToPlayer = false,
 		.moveAxis = FreecamSettings::MoveAxis::XZ,
 		.comboMoveAxis = FreecamSettings::MoveAxis::XY,
@@ -127,13 +170,27 @@ namespace xenomods {
 		.isGlobalRot = { false, true, false },
 		.camSpeed = 8.f,
 		.enableTargeting = false,
-		.targetPos = {}
+		.targetPos = {},
+		.unlockYaw = 0.f,
+		.unlockPitch = 0.f,
+		.unlockDistance = 8.f,
+		.unlockTargetHeight = 1.f,
+		.unlockRotateSpeed = 90.f,
+		.unlockZoomSpeed = 8.f
 	};
 
 	CameraTools::CameraState CameraTools::CamState = {
 		.matrix = glm::identity<glm::mat4>(),
 		.fov = 40.f
 	};
+	CameraTools::CameraState CameraTools::VisualCamState = {
+		.matrix = glm::identity<glm::mat4>(),
+		.fov = 40.f
+	};
+	glm::vec3 CameraTools::NormalCamTarget = {};
+	glm::vec3 CameraTools::VisualCamTarget = {};
+	glm::vec3 CameraTools::UnlockLastPlayerPosition = {};
+	bool CameraTools::HasNormalCamTarget = false;
 
 	CameraTools::CameraMeta CameraTools::CamMeta = {};
 	bool CameraTools::HasCameraState = false;
@@ -161,6 +218,110 @@ namespace xenomods {
 		CamMeta.up = rot * up;
 
 		CamMeta.fov = CamState.fov;
+	}
+
+	void InitializeCameraUnlockFromState() {
+		auto playerPosition = PlayerMovement::GetPartyPosition();
+		if(playerPosition == nullptr || !CameraTools::HasCameraState)
+			return;
+
+		CameraTools::VisualCamState = CameraTools::CamState;
+		CameraTools::UpdateMeta();
+		const auto cameraPosition = CameraTools::CamMeta.pos;
+
+		// XC2 already stores the normal camera's exact target. Use it directly
+		// so enabling unlock begins at the P1 camera's current transform with
+		// no inferred target or activation jump.
+		if(CameraTools::HasNormalCamTarget) {
+			CameraTools::VisualCamTarget =
+				CameraTools::NormalCamTarget;
+		} else {
+			CameraTools::VisualCamTarget =
+				cameraPosition
+				+ CameraTools::CamMeta.forward
+					* CameraTools::Settings.unlockDistance;
+		}
+
+		CameraTools::UnlockLastPlayerPosition = *playerPosition;
+		const glm::vec3 offset =
+			cameraPosition - CameraTools::VisualCamTarget;
+		const float distance = glm::length(offset);
+		if(distance <= 0.0001f)
+			return;
+
+		CameraTools::Settings.unlockYaw =
+			glm::degrees(std::atan2(offset.x, offset.z));
+		CameraTools::Settings.unlockPitch =
+			glm::degrees(std::asin(
+				std::clamp(offset.y / distance, -1.f, 1.f)
+			));
+		CameraTools::Settings.unlockDistance = distance;
+		CameraTools::Settings.unlockTargetHeight =
+			CameraTools::VisualCamTarget.y - playerPosition->y;
+	}
+
+	void UpdateCameraUnlock(float deltaTime) {
+		auto playerPosition = PlayerMovement::GetPartyPosition();
+		if(playerPosition == nullptr)
+			return;
+
+		auto& settings = CameraTools::Settings;
+		HidInput* secondController = HidInput::GetPlayer(2);
+		if(secondController->padConnected) {
+			glm::vec2 look = secondController->stateCur.RAxis;
+			glm::vec2 move = secondController->stateCur.LAxis;
+			constexpr float StickDeadzone = 0.15f;
+			if(glm::length(look) < StickDeadzone)
+				look = {};
+			if(glm::length(move) < StickDeadzone)
+				move = {};
+
+			settings.unlockYaw -=
+				look.x * settings.unlockRotateSpeed * deltaTime;
+			settings.unlockPitch -=
+				look.y * settings.unlockRotateSpeed * deltaTime;
+			settings.unlockDistance -=
+				move.y * settings.unlockZoomSpeed * deltaTime;
+			settings.unlockTargetHeight +=
+				move.x * settings.unlockZoomSpeed * 0.25f * deltaTime;
+		}
+
+		settings.unlockPitch =
+			std::clamp(settings.unlockPitch, -85.f, 85.f);
+		settings.unlockDistance =
+			std::max(settings.unlockDistance, 0.25f);
+
+		// Follow the P1-controlled character without borrowing any subsequent
+		// P1 camera rotation. The visual target receives only Rex's world-space
+		// displacement and P2's explicit height adjustment below.
+		const glm::vec3 playerDelta =
+			*playerPosition - CameraTools::UnlockLastPlayerPosition;
+		CameraTools::VisualCamTarget += playerDelta;
+		CameraTools::UnlockLastPlayerPosition = *playerPosition;
+
+		const float yaw = glm::radians(settings.unlockYaw);
+		const float pitch = glm::radians(settings.unlockPitch);
+		const float horizontalDistance =
+			settings.unlockDistance * std::cos(pitch);
+		const glm::vec3 offset(
+			horizontalDistance * std::sin(yaw),
+			settings.unlockDistance * std::sin(pitch),
+			horizontalDistance * std::cos(yaw)
+		);
+		CameraTools::VisualCamTarget.y =
+			playerPosition->y + settings.unlockTargetHeight;
+		const glm::vec3 target = CameraTools::VisualCamTarget;
+		const glm::vec3 cameraPosition = target + offset;
+
+		CameraTools::VisualCamState.matrix =
+			glm::inverse(glm::lookAt(
+				cameraPosition,
+				target,
+				glm::vec3(0.f, 1.f, 0.f)
+			));
+		// FOV remains tied to the normal P1 camera just like the camera-tools
+		// values. P2 controls only the visual orbit transform.
+		CameraTools::VisualCamState.fov = CameraTools::CamState.fov;
 	}
 
 	void DoFreeCameraMovement(float deltaTime) {
@@ -389,7 +550,56 @@ namespace xenomods {
 	}
 
 	void CameraTools::MenuSection() {
-		ImGui::Checkbox("Freecam", &Settings.freecamOn);
+		if(ImGui::Checkbox("Freecam", &Settings.freecamOn)) {
+			if(Settings.freecamOn)
+				Settings.cameraUnlockOn = false;
+		}
+		if(
+			ImGui::Checkbox(
+				"Camera Unlock (visual orbit)",
+				&Settings.cameraUnlockOn
+			)
+		) {
+			if(Settings.cameraUnlockOn) {
+				Settings.freecamOn = false;
+				InitializeCameraUnlockFromState();
+			}
+		}
+		if(Settings.cameraUnlockOn) {
+			ImGui::TextWrapped(
+				"The normal camera remains active for movement. "
+				"P2 controls only the displayed camera."
+			);
+			ImGui::PushItemWidth(150.f);
+			ImGui::DragFloat(
+				"Visual yaw",
+				&Settings.unlockYaw,
+				0.5f
+			);
+			ImGui::DragFloat(
+				"Visual pitch",
+				&Settings.unlockPitch,
+				0.5f,
+				-85.f,
+				85.f
+			);
+			ImGui::DragFloat(
+				"Visual distance",
+				&Settings.unlockDistance,
+				0.1f,
+				0.25f,
+				100.f
+			);
+			ImGui::DragFloat(
+				"Target height",
+				&Settings.unlockTargetHeight,
+				0.05f
+			);
+			ImGui::PopItemWidth();
+			ImGui::TextDisabled(
+				"P2: right stick orbit, left Y zoom, left X height"
+			);
+		}
 
 		ImGui::PushItemWidth(250.f);
 
@@ -490,6 +700,11 @@ namespace xenomods {
 
 	void CameraTools::Update(fw::UpdateInfo* updateInfo) {
 		HidInput* debugInput = HidInput::GetDebugInput();
+
+		if(Settings.cameraUnlockOn) {
+			UpdateCameraUnlock(updateInfo->updateDelta);
+			return;
+		}
 
 		// if there's only one controller, let them freecam only when the menu is open
 		if(debugInput == HidInput::GetPlayer(1) && !g_Menu->IsOpen())

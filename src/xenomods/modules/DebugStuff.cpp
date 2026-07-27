@@ -49,6 +49,13 @@ namespace {
 	};
 
 #if XENOMODS_OLD_ENGINE
+	// TitleMenu is embedded at TitleMain + 0x198. Its first field holds the
+	// title-menu result consumed by waitTitleMenuDestroy() and
+	// TitleStatePlayGame::enter(). Result 2 is the retail Continue selection.
+	constexpr std::size_t TitleMenuOffset = 0x198;
+	constexpr unsigned int TitleMenuResultContinue = 2;
+	bool reloadPrimarySavePending = false;
+
 	struct ObservedLocalGameFlag {
 		unsigned int bitSize;
 		int id;
@@ -85,15 +92,24 @@ namespace {
 	constexpr int IdColiPrimitiveCapsule = 2;
 	constexpr float TutorialTriggerAlpha = 0.5f;
 	constexpr float CutsceneTriggerAlpha = 0.5f;
+	constexpr float LandmarkTriggerAlpha = 0.5f;
 	constexpr unsigned int TutorialTriggerMapObjectBdatIndex = 0xAB;
 	constexpr unsigned int TutorialTriggerMapObjectResourceId = 2;
 	constexpr unsigned int CutsceneTriggerMapObjectResourceId = 108;
 	constexpr const char* CutsceneTriggerModelName = "oj/oj700009";
+	// RSC_MapObjList ID 4 has no BDAT references. Reserve it for landmarks.
+	// The other unreferenced candidates remain available: 13, 16, 33, 43,
+	// 92, 93, 94, 101, and 103.
+	constexpr unsigned int LandmarkTriggerMapObjectResourceId = 4;
+	constexpr const char* LandmarkTriggerModelName = "oj/oj200101";
 	constexpr const char* GfInitParamGimmickVtableSymbol =
 		"_ZTVN2gf18GfInitParamGimmickE";
 
 	constexpr std::size_t MaxTutorialTriggers = 128;
 	constexpr std::size_t MaxCutsceneTriggers = 128;
+	constexpr std::size_t MaxLandmarkTriggers = 128;
+	constexpr std::size_t LandmarkIdOffset = 0x38;
+	constexpr int LandmarkFlagIdBase = 51161;
 	constexpr std::size_t GmkEventBdatInfoOffset = 0x30;
 	constexpr std::size_t GmkEventIdOffset = 0x02;
 	void* updatingTutorial = nullptr;
@@ -148,6 +164,27 @@ namespace {
 			TutorialTriggerRenderStage::WaitingForFieldAssets;
 	};
 
+	struct LandmarkTriggerEntry {
+		void* landmark = nullptr;
+		int landmarkId = -1;
+		int flagId = -1;
+		mm::Mat44 transform {};
+		mm::Vec3 size {};
+		int primitiveType = -1;
+		bool hasShape = false;
+		bool inside = false;
+		bool previousInside = false;
+		bool modelNameChecked = false;
+		bool modelNameValid = false;
+		char actualModelName[32] {};
+		gf::GF_OBJ_HANDLE* model = nullptr;
+		bool modelBoundsReady = false;
+		mm::Vec3 modelMin {};
+		mm::Vec3 modelMax {};
+		TutorialTriggerRenderStage renderStage =
+			TutorialTriggerRenderStage::WaitingForFieldAssets;
+	};
+
 	struct TutorialTriggerMetrics {
 		bool valid = false;
 		int flagId = -1;
@@ -181,6 +218,12 @@ namespace {
 	unsigned char* validatedCutsceneMapObjectBdat = nullptr;
 	bool cutsceneMapObjectValidationFailureLogged = false;
 	bool logCutsceneTransformMetrics = true;
+	std::array<LandmarkTriggerEntry, MaxLandmarkTriggers> landmarkTriggers {};
+	std::size_t landmarkTriggerCount = 0;
+	bool landmarkTriggerRegistryOverflowLogged = false;
+	unsigned char* validatedLandmarkMapObjectBdat = nullptr;
+	bool landmarkMapObjectValidationFailureLogged = false;
+	bool logLandmarkTransformMetrics = false;
 
 	TutorialTriggerRenderStage tutorialTriggerRenderStage =
 		TutorialTriggerRenderStage::Disabled;
@@ -510,6 +553,40 @@ namespace {
 		cutsceneTriggerRegistryOverflowLogged = false;
 		validatedCutsceneMapObjectBdat = nullptr;
 		cutsceneMapObjectValidationFailureLogged = false;
+	}
+
+	void DestroyLandmarkTriggerModel(LandmarkTriggerEntry& entry) {
+		if(entry.model != nullptr && entry.model != reinterpret_cast<gf::GF_OBJ_HANDLE*>(-1))
+			gf::GfObjUtil::destroy(entry.model);
+
+		entry.model = nullptr;
+		entry.modelBoundsReady = false;
+		entry.modelMin = {};
+		entry.modelMax = {};
+		entry.renderStage = TutorialTriggerRenderStage::WaitingForFieldAssets;
+	}
+
+	void DestroyAllLandmarkTriggerModels() {
+		for(std::size_t i = 0; i < landmarkTriggerCount; i++)
+			DestroyLandmarkTriggerModel(landmarkTriggers[i]);
+	}
+
+	void ResetLandmarkTriggerVisualization() {
+		DestroyAllLandmarkTriggerModels();
+		for(std::size_t i = 0; i < landmarkTriggerCount; i++) {
+			landmarkTriggers[i].modelNameChecked = false;
+			landmarkTriggers[i].modelNameValid = false;
+			landmarkTriggers[i].actualModelName[0] = '\0';
+		}
+	}
+
+	void ClearLandmarkTriggerRegistry() {
+		DestroyAllLandmarkTriggerModels();
+		landmarkTriggers = {};
+		landmarkTriggerCount = 0;
+		landmarkTriggerRegistryOverflowLogged = false;
+		validatedLandmarkMapObjectBdat = nullptr;
+		landmarkMapObjectValidationFailureLogged = false;
 	}
 
 #if 0
@@ -1039,6 +1116,80 @@ namespace {
 		return entry;
 	}
 
+	int GetLandmarkId(const void* landmark) {
+		const auto bytes = static_cast<const std::uint8_t*>(landmark);
+		return *reinterpret_cast<const int*>(bytes + LandmarkIdOffset);
+	}
+
+	LandmarkTriggerEntry* FindLandmarkTrigger(const void* landmark) {
+		for(std::size_t i = 0; i < landmarkTriggerCount; i++) {
+			if(landmarkTriggers[i].landmark == landmark)
+				return &landmarkTriggers[i];
+		}
+		return nullptr;
+	}
+
+	LandmarkTriggerEntry* CaptureLandmarkTrigger(void* landmark) {
+		auto entry = FindLandmarkTrigger(landmark);
+		if(entry == nullptr) {
+			if(landmarkTriggerCount >= landmarkTriggers.size()) {
+				if(!landmarkTriggerRegistryOverflowLogged) {
+					xenomods::g_Logger->LogWarning(
+						"[Landmark trigger] Registry is full; additional landmark triggers will be ignored"
+					);
+					landmarkTriggerRegistryOverflowLogged = true;
+				}
+				return nullptr;
+			}
+
+			entry = &landmarkTriggers[landmarkTriggerCount++];
+			entry->landmark = landmark;
+			entry->landmarkId = GetLandmarkId(landmark);
+			entry->flagId = entry->landmarkId + LandmarkFlagIdBase;
+			xenomods::g_Logger->LogInfo(
+				"[Landmark trigger] Discovered landmark ID {}, flag ID {} ({} total on this map)",
+				entry->landmarkId,
+				entry->flagId,
+				landmarkTriggerCount
+			);
+		} else {
+			entry->landmarkId = GetLandmarkId(landmark);
+			entry->flagId = entry->landmarkId + LandmarkFlagIdBase;
+		}
+
+		entry->previousInside = entry->inside;
+		entry->hasShape = GetTutorialTriggerBox(
+			landmark,
+			entry->transform,
+			entry->size,
+			entry->primitiveType
+		);
+		entry->inside = IsInsideTutorialTrigger(landmark);
+
+		if(
+			logLandmarkTransformMetrics
+			&& entry->inside
+			&& !entry->previousInside
+		) {
+			const glm::mat4 transform = entry->transform;
+			const glm::vec3 center = glm::vec3(transform[3]);
+			const glm::vec3 size = entry->size;
+			xenomods::g_Logger->LogInfo(
+				"[Landmark trigger] Landmark {} entered; primitive {}, center ({:.3f}, {:.3f}, {:.3f}), size ({:.3f}, {:.3f}, {:.3f})",
+				entry->landmarkId,
+				GetTutorialPrimitiveTypeName(entry->primitiveType),
+				center.x,
+				center.y,
+				center.z,
+				size.x,
+				size.y,
+				size.z
+			);
+		}
+
+		return entry;
+	}
+
 	template<typename TriggerEntry>
 	bool CreateTriggerModel(
 		TriggerEntry& entry,
@@ -1100,6 +1251,43 @@ namespace {
 					"[Cutscene trigger] Using unused RSC_MapObjList ID {} ({})",
 					CutsceneTriggerMapObjectResourceId,
 					CutsceneTriggerModelName
+				);
+			}
+			if(
+				resourceId == LandmarkTriggerMapObjectResourceId
+				&& validatedLandmarkMapObjectBdat
+					!= tutorialTriggerMapObjectBdat
+			) {
+				const char* modelName = reinterpret_cast<const char*>(
+					Bdat::getVal(
+						tutorialTriggerMapObjectBdat,
+						"Model",
+						LandmarkTriggerMapObjectResourceId
+					)
+				);
+				if(
+					modelName == nullptr
+					|| std::strcmp(modelName, LandmarkTriggerModelName) != 0
+				) {
+					if(!landmarkMapObjectValidationFailureLogged) {
+						xenomods::g_Logger->LogWarning(
+							"[Landmark trigger] RSC_MapObjList ID {} is not the reserved {} slot (found {})",
+							LandmarkTriggerMapObjectResourceId,
+							LandmarkTriggerModelName,
+							modelName != nullptr ? modelName : "<null>"
+						);
+						landmarkMapObjectValidationFailureLogged = true;
+					}
+					entry.renderStage =
+						TutorialTriggerRenderStage::WaitingForFieldAssets;
+					return false;
+				}
+				validatedLandmarkMapObjectBdat =
+					tutorialTriggerMapObjectBdat;
+				xenomods::g_Logger->LogInfo(
+					"[Landmark trigger] Using unused RSC_MapObjList ID {} ({})",
+					LandmarkTriggerMapObjectResourceId,
+					LandmarkTriggerModelName
 				);
 			}
 
@@ -1359,6 +1547,56 @@ namespace {
 		}
 	}
 
+	void UpdateLandmarkTriggerModels() {
+		if(!xenomods::DebugStuff::renderLandmarkTrigger)
+			return;
+
+		bool createdModel = false;
+		for(std::size_t i = 0; i < landmarkTriggerCount; i++) {
+			auto& entry = landmarkTriggers[i];
+			if(entry.modelNameChecked && !entry.modelNameValid)
+				continue;
+			const bool canCreate = !createdModel && entry.model == nullptr;
+			UpdateTriggerModel(
+				entry,
+				canCreate,
+				LandmarkTriggerAlpha,
+				LandmarkTriggerMapObjectResourceId
+			);
+			if(canCreate && entry.model != nullptr)
+				createdModel = true;
+
+			if(entry.model != nullptr && !entry.modelNameChecked) {
+				const char* actualModelName =
+					gf::GfObjUtil::getModelResourceName(entry.model);
+				if(actualModelName != nullptr && actualModelName[0] != '\0') {
+					std::strncpy(
+						entry.actualModelName,
+						actualModelName,
+						sizeof(entry.actualModelName) - 1
+					);
+					entry.actualModelName[
+						sizeof(entry.actualModelName) - 1
+					] = '\0';
+					entry.modelNameChecked = true;
+					entry.modelNameValid =
+						std::strstr(
+							entry.actualModelName,
+							LandmarkTriggerModelName
+						) != nullptr;
+					xenomods::g_Logger->LogInfo(
+						"[Landmark trigger] Requested {}, created {} ({})",
+						LandmarkTriggerModelName,
+						entry.actualModelName,
+						entry.modelNameValid ? "verified" : "rejected"
+					);
+					if(!entry.modelNameValid)
+						DestroyLandmarkTriggerModel(entry);
+				}
+			}
+		}
+	}
+
 	constexpr std::size_t MaxTutorialCallSites = 32;
 	std::array<std::uintptr_t, MaxTutorialCallSites> tutorialCallSites {};
 	std::size_t tutorialCallSiteCount = 0;
@@ -1570,6 +1808,65 @@ namespace {
 		}
 	};
 
+	struct LandmarkUpdateHook
+		: skylaunch::hook::Trampoline<LandmarkUpdateHook> {
+		static void Hook(void* landmark, float deltaTime) {
+			CaptureLandmarkTrigger(landmark);
+			Orig(landmark, deltaTime);
+			CaptureLandmarkTrigger(landmark);
+		}
+	};
+
+	struct TitleSkipEventHook : skylaunch::hook::Trampoline<TitleSkipEventHook> {
+		static void Hook(void* state, tl::TitleMain* titleMain) {
+			if(!reloadPrimarySavePending) {
+				Orig(state, titleMain);
+				return;
+			}
+
+			// playTitleEvent() blocks while the title background event runs,
+			// then performs these two renderer cleanup operations. Preserve
+			// that cleanup without constructing or displaying the title scene.
+			fw::RenderParam::resetScene();
+			ml::ScnRenderDrSysParmAcc renderParams;
+			renderParams.weatherFrmEnd();
+			xenomods::g_Logger->LogInfo(
+				"[Reload save] Skipped title event and reset its render state"
+			);
+		}
+	};
+
+	struct TitleSkipMenuHook : skylaunch::hook::Trampoline<TitleSkipMenuHook> {
+		static bool Hook(void* state, tl::TitleMain* titleMain, bool unk) {
+			if(reloadPrimarySavePending)
+				return false;
+
+			return Orig(state, titleMain, unk);
+		}
+	};
+
+	struct TitleContinueHook : skylaunch::hook::Trampoline<TitleContinueHook> {
+		static bool Hook(void* state, tl::TitleMain* titleMain) {
+			if(reloadPrimarySavePending && titleMain != nullptr) {
+				*reinterpret_cast<unsigned int*>(
+					reinterpret_cast<std::uintptr_t>(titleMain)
+					+ TitleMenuOffset
+				) = TitleMenuResultContinue;
+				reloadPrimarySavePending = false;
+				xenomods::g_Logger->LogInfo(
+					"[Reload save] Skipped title menu and submitted Continue"
+				);
+
+				// Returning false sends TitleStateMainScreen into its native
+				// menu-destroy/Continue transition. The required title event
+				// and render-scene synchronization have already completed.
+				return false;
+			}
+
+			return Orig(state, titleMain);
+		}
+	};
+
 	struct BGMDebugging : skylaunch::hook::Trampoline<BGMDebugging> {
 		static void Hook(gf::BgmTrack* this_pointer, fw::UpdateInfo* updateInfo) {
 			Orig(this_pointer, updateInfo);
@@ -1663,6 +1960,7 @@ namespace xenomods {
 	bool DebugStuff::pauseTutorialRepeatUntilExit = true;
 	bool DebugStuff::renderTutorialTrigger = false;
 	bool DebugStuff::renderCutsceneTrigger = false;
+	bool DebugStuff::renderLandmarkTrigger = false;
 	bool DebugStuff::traceLocalGameFlags = false;
 	bool DebugStuff::traceTutorialCallSites = false;
 
@@ -1769,6 +2067,16 @@ namespace xenomods {
 		}
 
 		game::SeqUtil::returnTitle(*DocumentPtr);
+#endif
+	}
+
+	void DebugStuff::ReloadSave() {
+#if XENOMODS_OLD_ENGINE
+		reloadPrimarySavePending = true;
+		// Start the normal field-to-title teardown. The required title event
+		// provides the render-scene transition barrier; only the fullscreen
+		// title menu itself is skipped before submitting Continue.
+		tl::TitleMain::returnTitle(gf::CurrentSlot);
 #endif
 	}
 
@@ -1935,6 +2243,9 @@ namespace xenomods {
 	#endif
 		if(ImGui::Button("Return to Title"))
 			DebugStuff::ReturnTitle();
+		ImGui::SameLine();
+		if(ImGui::Button("Reload Save"))
+			DebugStuff::ReloadSave();
 #endif
 	}
 
@@ -2035,6 +2346,48 @@ namespace xenomods {
 				"Active event %d: %s",
 				cutsceneTriggers[i].eventId,
 				GetTutorialPrimitiveTypeName(cutsceneTriggers[i].primitiveType)
+			);
+			ImGui::Text(
+				"Center %.2f, %.2f, %.2f; size %.2f, %.2f, %.2f",
+				center.x,
+				center.y,
+				center.z,
+				size.x,
+				size.y,
+				size.z
+			);
+		}
+
+		ImGui::SeparatorText("Landmark trigger diagnostics");
+		ImGui::Checkbox(
+			"Log landmark transforms on activation",
+			&logLandmarkTransformMetrics
+		);
+		std::size_t landmarkRenderedCount = 0;
+		std::size_t landmarkActiveCount = 0;
+		for(std::size_t i = 0; i < landmarkTriggerCount; i++) {
+			if(
+				landmarkTriggers[i].renderStage
+					== TutorialTriggerRenderStage::Rendering
+			)
+				landmarkRenderedCount++;
+			if(landmarkTriggers[i].inside)
+				landmarkActiveCount++;
+		}
+		ImGui::Text("Landmark triggers found: %zu", landmarkTriggerCount);
+		ImGui::Text("Landmark triggers rendered: %zu", landmarkRenderedCount);
+		ImGui::Text("Landmark triggers active: %zu", landmarkActiveCount);
+		for(std::size_t i = 0; i < landmarkTriggerCount; i++) {
+			if(!landmarkTriggers[i].inside)
+				continue;
+			const glm::mat4 transform = landmarkTriggers[i].transform;
+			const glm::vec3 center = glm::vec3(transform[3]);
+			const glm::vec3 size = landmarkTriggers[i].size;
+			ImGui::Text(
+				"Active landmark %d, flag %d: %s",
+				landmarkTriggers[i].landmarkId,
+				landmarkTriggers[i].flagId,
+				GetTutorialPrimitiveTypeName(landmarkTriggers[i].primitiveType)
 			);
 			ImGui::Text(
 				"Center %.2f, %.2f, %.2f; size %.2f, %.2f, %.2f",
@@ -2194,6 +2547,24 @@ namespace xenomods {
 #endif
 	}
 
+	void DebugStuff::LandmarkTriggerToolsMenuSection() {
+#if XENOMODS_OLD_ENGINE
+		if(
+			ImGui::Checkbox(
+				"Render landmark triggers",
+				&DebugStuff::renderLandmarkTrigger
+			)
+		)
+			ResetLandmarkTriggerVisualization();
+
+		ImGui::TextWrapped(
+			"Displays landmark discovery phantoms as yellow, depth-tested "
+			"world boxes."
+		);
+		ImGui::Text("Landmark triggers found: %zu", landmarkTriggerCount);
+#endif
+	}
+
 	void DebugStuff::Initialize() {
 		UpdatableModule::Initialize();
 		g_Logger->LogDebug("Setting up debug stuff...");
@@ -2208,6 +2579,16 @@ namespace xenomods {
 		TutorialBeginHook::HookAt("_ZN3gmk11GmkTutorial13beginTutorialEv");
 		TutorialUpdateHook::HookAt("_ZN3gmk11GmkTutorial6updateEf");
 		CutsceneEventUpdateHook::HookAt("_ZN3gmk8GmkEvent6updateEf");
+		LandmarkUpdateHook::HookAt("_ZN3gmk11GmkLandmark6updateEf");
+		TitleSkipEventHook::HookAt(
+			"_ZN2tl20TitleStateMainScreen14playTitleEventEPNS_9TitleMainE"
+		);
+		TitleSkipMenuHook::HookAt(
+			"_ZN2tl20TitleStateMainScreen13dispTitleMenuEPNS_9TitleMainEb"
+		);
+		TitleContinueHook::HookAt(
+			"_ZN2tl20TitleStateMainScreen15checkMenuResultEPNS_9TitleMainE"
+		);
 
 		JumpToClosedLandmarks_CanEnterMap::HookAt(&gf::GfMenuObjWorldMap::isEnterMap);
 		JumpToClosedLandmarks_CheckCondition::HookAt(&gf::GfMenuObjWorldMap::chkMapCond);
@@ -2236,6 +2617,7 @@ namespace xenomods {
 #if XENOMODS_OLD_ENGINE
 		UpdateTutorialTriggerModels();
 		UpdateCutsceneTriggerModels();
+		UpdateLandmarkTriggerModels();
 #endif
 
 		if(pauseEnable && pauseStepForward > 0) {
@@ -2247,6 +2629,7 @@ namespace xenomods {
 #if XENOMODS_OLD_ENGINE
 		ClearTutorialTriggerRegistry();
 		ClearCutsceneTriggerRegistry();
+		ClearLandmarkTriggerRegistry();
 #endif
 	}
 

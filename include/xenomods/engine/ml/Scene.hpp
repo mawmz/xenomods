@@ -176,6 +176,8 @@ namespace ml {
 		bool isGodRay() const;
 		void setGodRay(bool);
 
+		void weatherFrmEnd();
+
 		void setShadowStr(float);
 
 		float getSpecularStr() const;

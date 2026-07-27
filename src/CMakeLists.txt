@@ -99,7 +99,19 @@ set_target_properties(xenomods PROPERTIES
 		# PIC binary, because we can't use add_library(xxx SHARED).
 		# This is ugly, but it SHOULD work.
 		COMPILE_FLAGS "-fPIC -enable-libstdcxx-allocator=new"
-		LINK_FLAGS "-fPIC -specs=${PROJECT_BINARY_DIR}/switch.specs -Wl,-Map,xenomods.map -Wl,--version-script=${PROJECT_SOURCE_DIR}/linkerscripts/exported.txt -nodefaultlibs -Wl,-init=__custom_init -Wl,-fini=__custom_fini -Wl,--export-dynamic -L ${DEVKITPRO}/portlibs/switch/lib -L ${DEVKITPRO}/libnx/lib"
+)
+
+target_link_options(xenomods PRIVATE
+		-fPIC
+		-specs=switch.specs
+		-Wl,-Map,xenomods.map
+		-Wl,--version-script=../linkerscripts/exported.txt
+		-nodefaultlibs
+		-Wl,-init=__custom_init
+		-Wl,-fini=__custom_fini
+		-Wl,--export-dynamic
+		"-L${DEVKITPRO}/portlibs/switch/lib"
+		"-L${DEVKITPRO}/libnx/lib"
 )
 
 xenomods_external_fpic(imgui_xeno)
@@ -162,6 +174,9 @@ if(NOT XENOMODS_BF2_BUILD_INDEX EQUAL -1)
 				${PROJECT_SOURCE_DIR}/assets/tutorial_trigger/romfs/model/oj/oj700009.arc
 				${PROJECT_SOURCE_DIR}/assets/tutorial_trigger/romfs/model/oj/oj700009.wimdo
 				${PROJECT_SOURCE_DIR}/assets/tutorial_trigger/romfs/model/oj/oj700009.wismt
+				${PROJECT_SOURCE_DIR}/assets/tutorial_trigger/romfs/model/oj/oj200101.arc
+				${PROJECT_SOURCE_DIR}/assets/tutorial_trigger/romfs/model/oj/oj200101.wimdo
+				${PROJECT_SOURCE_DIR}/assets/tutorial_trigger/romfs/model/oj/oj200101.wismt
 				${PROJECT_BINARY_DIR}/romfs/model/oj
 			VERBATIM
 			COMMENT "Refreshing bf2 tutorial-trigger romfs files"

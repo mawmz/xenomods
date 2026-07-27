@@ -29,6 +29,12 @@ namespace fw {
 		void update();
 	};
 
+#if XENOMODS_OLD_ENGINE
+	struct RenderParam {
+		static void resetScene();
+	};
+#endif
+
 	struct FrameworkController {
 #if XENOMODS_CODENAME(bfsw)
 		INSERT_PADDING_BYTES(0x90);
