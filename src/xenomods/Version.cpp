@@ -7,9 +7,10 @@
 #include "skylaunch/nx/kernel/svc.h"
 
 namespace xenomods::version {
+	static constexpr const char* InternalVersion = "v1.0.0";
 
 	const char* BuildGitVersion() {
-		return fullTag;
+		return InternalVersion;
 	}
 	const char* BuildTimestamp() {
 		return __DATE__ " " __TIME__;

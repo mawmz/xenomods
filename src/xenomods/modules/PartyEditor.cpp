@@ -243,46 +243,6 @@ namespace xenomods {
 		UpdatableModule::Initialize();
 		g_Logger->LogDebug("Setting up party editor...");
 
-		auto modules = g_Menu->FindSection("modules");
-		if(modules != nullptr) {
-			auto baseSection = modules->RegisterSection(STRINGIFY(PartyEditor), "Party Editor");
-			//baseSection->RegisterRenderCallback(&MenuSection);
-
-			// this is done to properly support only showing the right controls
-			// for Torna, as DLC or as standalone
-			// (ie on <2.0.0 we don't make a base game section)
-			auto section = baseSection;
-#if XENOMODS_OLD_ENGINE
-			bool skipTorna = false;
-
-			if(version::RuntimeGame() == version::GameType::BF2) {
-				auto ptr = *skylaunch::hook::detail::ResolveSymbol<gf::GfGameAoc**>("_ZZN2mm3mtl12PtrSingletonIN2gf9GfGameAocEE3sysEvE10s_instance");
-
-				if(version::RuntimeVersion() >= version::SemVer::v2_0_0 && (ptr != nullptr && ptr->isExistGameAoc(static_cast<gf::GAMEAOC>(gf::GAMEAOC::Ira | gf::GAMEAOC::Ver1_1))))
-					section = baseSection->RegisterSection(std::string(STRINGIFY(PartyEditor)) + "_base", "Party...");
-				else
-					skipTorna = true;
-
-				section->RegisterRenderCallback(&MenuBaseParty);
-			}
-
-			if(!skipTorna) {
-				if(version::RuntimeGame() != version::GameType::IRA)
-					section = baseSection->RegisterSection(std::string(STRINGIFY(PartyEditor)) + "_ira", "Teams...");
-
-				section->RegisterRenderCallback(&MenuIraParty);
-			}
-#elif XENOMODS_CODENAME(bfsw)
-			auto order = baseSection->RegisterSection(std::string(STRINGIFY(PartyEditor)) + "_order", "Party Order");
-			order->RegisterRenderCallback(&MenuOrder);
-
-			auto status = baseSection->RegisterSection(std::string(STRINGIFY(PartyEditor)) + "_status", "PC Status");
-			status->RegisterRenderCallback(&MenuStatus);
-
-			auto exp = baseSection->RegisterSection(std::string(STRINGIFY(PartyEditor)) + "_addexp", "Add Experience");
-			exp->RegisterRenderCallback(&MenuAddExperience);
-#endif
-		}
 	}
 
 #if !XENOMODS_CODENAME(bf3)

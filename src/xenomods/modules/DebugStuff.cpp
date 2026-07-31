@@ -1,4 +1,5 @@
 #include "DebugStuff.hpp"
+#include "ToolWindowLayout.hpp"
 
 #include "xenomods/engine/apps/FrameworkLauncher.hpp"
 #include "xenomods/engine/bdat/Bdat.hpp"
@@ -17,6 +18,7 @@
 #include "xenomods/engine/gf/MenuObject.hpp"
 #include "xenomods/engine/gf/Party.hpp"
 #include "xenomods/engine/gf/PlayFactory.hpp"
+#include "xenomods/engine/gf/PlayerController.hpp"
 #include "xenomods/engine/gf/SaveGame.hpp"
 #include "xenomods/engine/gf/Weather.hpp"
 #include "xenomods/engine/gmk/Landmark.hpp"
@@ -93,27 +95,107 @@ namespace {
 	constexpr float TutorialTriggerAlpha = 0.5f;
 	constexpr float CutsceneTriggerAlpha = 0.5f;
 	constexpr float LandmarkTriggerAlpha = 0.5f;
+	constexpr float CollectionPointRangeAlpha = 0.5f;
+	constexpr float CollectionPointFallbackRadius = 3.0f;
+	constexpr float CollectionPointFallbackUpperHeight = 3.0f;
+	constexpr float CollectionPointFallbackLowerHeight = 3.0f;
+	constexpr float CollectionPointRenderDistance = 100.0f;
 	constexpr unsigned int TutorialTriggerMapObjectBdatIndex = 0xAB;
 	constexpr unsigned int TutorialTriggerMapObjectResourceId = 2;
+	constexpr unsigned int TutorialSphereMapObjectResourceId = 16;
+	constexpr const char* TutorialSphereModelName = "oj/oj490002";
+	constexpr unsigned int TutorialCapsuleMapObjectResourceId = 43;
+	constexpr const char* TutorialCapsuleModelName = "oj/oj101002";
 	constexpr unsigned int CutsceneTriggerMapObjectResourceId = 108;
 	constexpr const char* CutsceneTriggerModelName = "oj/oj700009";
+	constexpr unsigned int CutsceneSphereMapObjectResourceId = 92;
+	constexpr const char* CutsceneSphereModelName = "oj/oj740010";
+	constexpr unsigned int CutsceneCapsuleMapObjectResourceId = 93;
+	constexpr const char* CutsceneCapsuleModelName = "oj/oj740011";
 	// RSC_MapObjList ID 4 has no BDAT references. Reserve it for landmarks.
 	// The other unreferenced candidates remain available: 13, 16, 33, 43,
 	// 92, 93, 94, 101, and 103.
 	constexpr unsigned int LandmarkTriggerMapObjectResourceId = 4;
 	constexpr const char* LandmarkTriggerModelName = "oj/oj200101";
+	constexpr unsigned int LandmarkSphereMapObjectResourceId = 94;
+	constexpr const char* LandmarkSphereModelName = "oj/oj740012";
+	constexpr unsigned int LandmarkCapsuleMapObjectResourceId = 101;
+	constexpr const char* LandmarkCapsuleModelName = "oj/oj700101";
+	// RSC_MapObjList ID 103 is unreferenced by retail placement data. Reserve
+	// its authored model path for the collection-point access cylinder.
+	constexpr unsigned int CollectionPointMapObjectResourceId = 103;
+	constexpr const char* CollectionPointModelName = "oj/oj741017";
 	constexpr const char* GfInitParamGimmickVtableSymbol =
 		"_ZTVN2gf18GfInitParamGimmickE";
 
 	constexpr std::size_t MaxTutorialTriggers = 128;
 	constexpr std::size_t MaxCutsceneTriggers = 128;
 	constexpr std::size_t MaxLandmarkTriggers = 128;
+	constexpr std::size_t MaxCollectionPoints = 256;
+	constexpr std::size_t CollectionPositionPointerOffset = 0x10;
+	constexpr std::size_t CollectionObjectHandleOffset = 0x48;
+	constexpr std::size_t CollectionIdOffset = 0x38;
 	constexpr std::size_t LandmarkIdOffset = 0x38;
 	constexpr int LandmarkFlagIdBase = 51161;
 	constexpr std::size_t GmkEventBdatInfoOffset = 0x30;
 	constexpr std::size_t GmkEventIdOffset = 0x02;
 	void* updatingTutorial = nullptr;
 	unsigned char* tutorialTriggerMapObjectBdat = nullptr;
+	unsigned char* validatedTriggerResourceBdat = nullptr;
+	std::array<std::uint8_t, 256> triggerResourceValidation {};
+
+	struct TriggerModelAsset {
+		unsigned int resourceId;
+		const char* modelName;
+		glm::vec3 sourceExtent;
+	};
+
+	const TriggerModelAsset TutorialBoxAsset {
+		TutorialTriggerMapObjectResourceId, "oj/oj900401", glm::vec3(1.92f)
+	};
+	const TriggerModelAsset TutorialSphereAsset {
+		TutorialSphereMapObjectResourceId, TutorialSphereModelName, glm::vec3(1.92f)
+	};
+	const TriggerModelAsset TutorialCapsuleAsset {
+		TutorialCapsuleMapObjectResourceId,
+		TutorialCapsuleModelName,
+		glm::vec3(1.92f, 3.84f, 1.92f)
+	};
+	const TriggerModelAsset CutsceneBoxAsset {
+		CutsceneTriggerMapObjectResourceId, CutsceneTriggerModelName, glm::vec3(1.92f)
+	};
+	const TriggerModelAsset CutsceneSphereAsset {
+		CutsceneSphereMapObjectResourceId, CutsceneSphereModelName, glm::vec3(1.92f)
+	};
+	const TriggerModelAsset CutsceneCapsuleAsset {
+		CutsceneCapsuleMapObjectResourceId,
+		CutsceneCapsuleModelName,
+		glm::vec3(1.92f, 3.84f, 1.92f)
+	};
+	const TriggerModelAsset LandmarkBoxAsset {
+		LandmarkTriggerMapObjectResourceId, LandmarkTriggerModelName, glm::vec3(1.92f)
+	};
+	const TriggerModelAsset LandmarkSphereAsset {
+		LandmarkSphereMapObjectResourceId, LandmarkSphereModelName, glm::vec3(1.92f)
+	};
+	const TriggerModelAsset LandmarkCapsuleAsset {
+		LandmarkCapsuleMapObjectResourceId,
+		LandmarkCapsuleModelName,
+		glm::vec3(1.92f, 3.84f, 1.92f)
+	};
+	const TriggerModelAsset CollectionPointCylinderAsset {
+		CollectionPointMapObjectResourceId,
+		CollectionPointModelName,
+		glm::vec3(1.92f)
+	};
+
+	struct CollectionAccessParam {
+		float forwardOffset;
+		float radius;
+		float upperHeight;
+		float lowerHeight;
+	};
+	static_assert(sizeof(CollectionAccessParam) == 0x10);
 
 	enum class TutorialTriggerRenderStage {
 		Disabled,
@@ -185,6 +267,22 @@ namespace {
 			TutorialTriggerRenderStage::WaitingForFieldAssets;
 	};
 
+	struct CollectionPointEntry {
+		void* collection = nullptr;
+		int collectionId = -1;
+		gf::GF_OBJ_HANDLE* target = nullptr;
+		mm::Mat44 transform {};
+		mm::Vec3 size {};
+		bool hasShape = false;
+		bool inside = false;
+		gf::GF_OBJ_HANDLE* model = nullptr;
+		bool modelBoundsReady = false;
+		mm::Vec3 modelMin {};
+		mm::Vec3 modelMax {};
+		TutorialTriggerRenderStage renderStage =
+			TutorialTriggerRenderStage::WaitingForFieldAssets;
+	};
+
 	struct TutorialTriggerMetrics {
 		bool valid = false;
 		int flagId = -1;
@@ -224,6 +322,15 @@ namespace {
 	unsigned char* validatedLandmarkMapObjectBdat = nullptr;
 	bool landmarkMapObjectValidationFailureLogged = false;
 	bool logLandmarkTransformMetrics = false;
+	std::array<CollectionPointEntry, MaxCollectionPoints> collectionPoints {};
+	std::size_t collectionPointCount = 0;
+	bool collectionPointRegistryOverflowLogged = false;
+	CollectionAccessParam collectionAccessParam {};
+	bool collectionAccessParamValid = false;
+	float nearestCollectionPointDistance = -1.0f;
+	std::size_t nearbyCollectionPointCount = 0;
+	TutorialTriggerRenderStage nearestCollectionPointRenderStage =
+		TutorialTriggerRenderStage::WaitingForTrigger;
 
 	TutorialTriggerRenderStage tutorialTriggerRenderStage =
 		TutorialTriggerRenderStage::Disabled;
@@ -252,6 +359,32 @@ namespace {
 		return "unknown";
 	}
 
+	const char* GetTriggerRenderStageName(
+		TutorialTriggerRenderStage stage
+	) {
+		switch(stage) {
+			case TutorialTriggerRenderStage::Disabled:
+				return "disabled";
+			case TutorialTriggerRenderStage::WaitingForTrigger:
+				return "waiting for nearby collection point";
+			case TutorialTriggerRenderStage::WaitingForFieldAssets:
+				return "waiting for field assets / RSC validation";
+			case TutorialTriggerRenderStage::CreatingModel:
+				return "creating map object";
+			case TutorialTriggerRenderStage::LoadingModel:
+				return "loading world model";
+			case TutorialTriggerRenderStage::WaitingForObjectComponent:
+				return "waiting for model component";
+			case TutorialTriggerRenderStage::WaitingForSceneModel:
+				return "waiting for scene model";
+			case TutorialTriggerRenderStage::InvalidModelBounds:
+				return "model returned invalid bounds";
+			case TutorialTriggerRenderStage::Rendering:
+				return "rendering";
+		}
+		return "unknown";
+	}
+
 	const char* GetTutorialPrimitiveTypeName(int primitiveType) {
 		switch(primitiveType) {
 			case IdColiPrimitiveSphere:
@@ -262,6 +395,22 @@ namespace {
 				return "capsule";
 			default:
 				return "unknown";
+		}
+	}
+
+	const TriggerModelAsset& SelectTriggerAsset(
+		int primitiveType,
+		const TriggerModelAsset& box,
+		const TriggerModelAsset& sphere,
+		const TriggerModelAsset& capsule
+	) {
+		switch(primitiveType) {
+			case IdColiPrimitiveSphere:
+				return sphere;
+			case IdColiPrimitiveCapsule:
+				return capsule;
+			default:
+				return box;
 		}
 	}
 
@@ -589,6 +738,39 @@ namespace {
 		landmarkMapObjectValidationFailureLogged = false;
 	}
 
+	void DestroyCollectionPointModel(CollectionPointEntry& entry) {
+		if(
+			entry.model != nullptr
+			&& entry.model != reinterpret_cast<gf::GF_OBJ_HANDLE*>(-1)
+		)
+			gf::GfObjUtil::destroy(entry.model);
+
+		entry.model = nullptr;
+		entry.modelBoundsReady = false;
+		entry.modelMin = {};
+		entry.modelMax = {};
+		entry.renderStage =
+			TutorialTriggerRenderStage::WaitingForFieldAssets;
+	}
+
+	void DestroyAllCollectionPointModels() {
+		for(std::size_t i = 0; i < collectionPointCount; i++)
+			DestroyCollectionPointModel(collectionPoints[i]);
+	}
+
+	void ResetCollectionPointVisualization() {
+		DestroyAllCollectionPointModels();
+	}
+
+	void ClearCollectionPointRegistry() {
+		DestroyAllCollectionPointModels();
+		collectionPoints = {};
+		collectionPointCount = 0;
+		collectionPointRegistryOverflowLogged = false;
+		collectionAccessParam = {};
+		collectionAccessParamValid = false;
+	}
+
 #if 0
 	// Retained temporarily as reverse-engineering notes only. oj900401's
 	// phong45 runtime material does not expose a replaceable sampled slot in
@@ -905,14 +1087,33 @@ namespace {
 			reinterpret_cast<const float*>(
 				idColiObject + IdColiObjectHalfExtentsOffset
 			);
-		const glm::vec3 boxSize(
+		glm::vec3 primitiveSize(
 			std::abs(halfExtents[0]) * 2.0f,
 			std::abs(halfExtents[1]) * 2.0f,
 			std::abs(halfExtents[2]) * 2.0f
 		);
+		if(livePrimitiveType == IdColiPrimitiveSphere) {
+			const float diameter = std::abs(halfExtents[0]) * 2.0f;
+			primitiveSize = glm::vec3(diameter);
+		} else if(livePrimitiveType == IdColiPrimitiveCapsule) {
+			// createCapsule(length, radius) stores {radius, length, radius}.
+			// IDColi tests a Y-axis line segment of `length` with radius around
+			// both endpoints, so the complete visible envelope is length + 2r.
+			const float radius = std::abs(halfExtents[0]);
+			const float straightLength = std::abs(halfExtents[1]);
+			primitiveSize = glm::vec3(
+				radius * 2.0f,
+				straightLength + radius * 2.0f,
+				radius * 2.0f
+			);
+		}
 		if(
-			!std::isfinite(boxSize.x) || !std::isfinite(boxSize.y) || !std::isfinite(boxSize.z)
-			|| boxSize.x <= 0.0f || boxSize.y <= 0.0f || boxSize.z <= 0.0f
+			!std::isfinite(primitiveSize.x)
+			|| !std::isfinite(primitiveSize.y)
+			|| !std::isfinite(primitiveSize.z)
+			|| primitiveSize.x <= 0.0f
+			|| primitiveSize.y <= 0.0f
+			|| primitiveSize.z <= 0.0f
 		)
 			return false;
 
@@ -932,7 +1133,7 @@ namespace {
 		}
 
 		transform = mm::Mat44(worldMatrix);
-		size = mm::Vec3(boxSize);
+		size = mm::Vec3(primitiveSize);
 		primitiveType = livePrimitiveType;
 		return true;
 	}
@@ -1190,10 +1391,164 @@ namespace {
 		return entry;
 	}
 
+	void CaptureCollectionAccessParam(const CollectionAccessParam* param) {
+		if(param == nullptr)
+			return;
+		if(
+			!std::isfinite(param->forwardOffset)
+			|| !std::isfinite(param->radius)
+			|| !std::isfinite(param->upperHeight)
+			|| !std::isfinite(param->lowerHeight)
+			|| param->radius <= 0.0f
+			|| param->upperHeight < 0.0f
+			|| param->lowerHeight < 0.0f
+		)
+			return;
+
+		const bool firstCapture = !collectionAccessParamValid;
+		collectionAccessParam = *param;
+		collectionAccessParamValid = true;
+		if(firstCapture) {
+			xenomods::g_Logger->LogInfo(
+				"[Collection range] Captured live AccessParam: forward {:.3f}, radius {:.3f}, upper {:.3f}, lower {:.3f}",
+				param->forwardOffset,
+				param->radius,
+				param->upperHeight,
+				param->lowerHeight
+			);
+		}
+	}
+
+	void CaptureCollectionAccessResource(const void* plugin) {
+		if(plugin == nullptr)
+			return;
+
+		// AccessPlugin owns a pointer to the shared access-parameter resource
+		// at +0x18. Entry zero is the normal field A-button interaction range.
+		const auto pluginBytes =
+			static_cast<const std::uint8_t*>(plugin);
+		const auto resource =
+			*reinterpret_cast<const std::uint8_t* const*>(
+				pluginBytes + 0x18
+			);
+		if(resource == nullptr)
+			return;
+
+		const std::uint32_t count =
+			*reinterpret_cast<const std::uint32_t*>(resource + 0x0C);
+		const auto entries =
+			*reinterpret_cast<const std::uint8_t* const*>(
+				resource + 0x10
+			);
+		if(count == 0 || entries == nullptr)
+			return;
+
+		const auto param =
+			*reinterpret_cast<const CollectionAccessParam* const*>(
+				entries + 0x08
+			);
+		CaptureCollectionAccessParam(param);
+	}
+
+	CollectionPointEntry* FindCollectionPoint(const void* collection) {
+		for(std::size_t i = 0; i < collectionPointCount; i++) {
+			if(collectionPoints[i].collection == collection)
+				return &collectionPoints[i];
+		}
+		return nullptr;
+	}
+
+	CollectionPointEntry* FindCollectionPoint(gf::GF_OBJ_HANDLE* target) {
+		for(std::size_t i = 0; i < collectionPointCount; i++) {
+			if(collectionPoints[i].target == target)
+				return &collectionPoints[i];
+		}
+		return nullptr;
+	}
+
+	CollectionPointEntry* CaptureCollectionPoint(void* collection) {
+		if(collection == nullptr)
+			return nullptr;
+
+		auto entry = FindCollectionPoint(collection);
+		if(entry == nullptr) {
+			if(collectionPointCount >= collectionPoints.size()) {
+				if(!collectionPointRegistryOverflowLogged) {
+					xenomods::g_Logger->LogWarning(
+						"[Collection range] Registry is full; additional collection points will be ignored"
+					);
+					collectionPointRegistryOverflowLogged = true;
+				}
+				return nullptr;
+			}
+
+			entry = &collectionPoints[collectionPointCount++];
+			entry->collection = collection;
+			xenomods::g_Logger->LogInfo(
+				"[Collection range] Discovered collection point ({} total on this map)",
+				collectionPointCount
+			);
+		}
+
+		const auto bytes = static_cast<const std::uint8_t*>(collection);
+		entry->collectionId =
+			*reinterpret_cast<const int*>(bytes + CollectionIdOffset);
+		entry->target =
+			*reinterpret_cast<gf::GF_OBJ_HANDLE* const*>(
+				bytes + CollectionObjectHandleOffset
+			);
+		entry->hasShape = false;
+		const auto position =
+			*reinterpret_cast<const mm::Vec3* const*>(
+				bytes + CollectionPositionPointerOffset
+			);
+		if(position == nullptr)
+			return entry;
+
+		const float upperHeight = collectionAccessParamValid
+			? collectionAccessParam.upperHeight
+			: CollectionPointFallbackUpperHeight;
+		const float lowerHeight = collectionAccessParamValid
+			? collectionAccessParam.lowerHeight
+			: CollectionPointFallbackLowerHeight;
+		const float baseRadius = collectionAccessParamValid
+			? collectionAccessParam.radius
+			: CollectionPointFallbackRadius;
+		const float radius = baseRadius;
+		const float height = upperHeight + lowerHeight;
+		const glm::vec3 collectionPosition = *position;
+		if(
+			!std::isfinite(collectionPosition.x)
+			|| !std::isfinite(collectionPosition.y)
+			|| !std::isfinite(collectionPosition.z)
+			|| !std::isfinite(radius)
+			|| !std::isfinite(height)
+			|| radius <= 0.0f
+			|| height <= 0.0f
+		)
+			return entry;
+
+		// isActiveRange() tests the target against a player-centered cylinder:
+		//   -lower <= targetY - accessY <= upper.
+		// Invert that relation to draw the equivalent access-origin region
+		// around the target. The upper/lower heights therefore swap sides.
+		glm::vec3 center = collectionPosition;
+		center.y += (lowerHeight - upperHeight) * 0.5f;
+
+		glm::mat4 cylinderTransform(1.0f);
+		cylinderTransform[3] = glm::vec4(center, 1.0f);
+		entry->transform = mm::Mat44(cylinderTransform);
+		entry->size = mm::Vec3(
+			glm::vec3(radius * 2.0f, height, radius * 2.0f)
+		);
+		entry->hasShape = true;
+		return entry;
+	}
+
 	template<typename TriggerEntry>
 	bool CreateTriggerModel(
 		TriggerEntry& entry,
-		unsigned int resourceId
+		const TriggerModelAsset& asset
 	) {
 		if(entry.model != nullptr || !entry.hasShape)
 			return false;
@@ -1216,79 +1571,46 @@ namespace {
 				entry.renderStage = TutorialTriggerRenderStage::WaitingForFieldAssets;
 				return false;
 			}
-			if(
-				resourceId == CutsceneTriggerMapObjectResourceId
-				&& validatedCutsceneMapObjectBdat
-					!= tutorialTriggerMapObjectBdat
-			) {
-				const char* modelName = reinterpret_cast<const char*>(
-					Bdat::getVal(
-						tutorialTriggerMapObjectBdat,
-						"Model",
-						CutsceneTriggerMapObjectResourceId
-					)
-				);
-				if(
-					modelName == nullptr
-					|| std::strcmp(modelName, CutsceneTriggerModelName) != 0
-				) {
-					if(!cutsceneMapObjectValidationFailureLogged) {
-						xenomods::g_Logger->LogWarning(
-							"[Cutscene trigger] RSC_MapObjList ID {} is not the reserved {} slot (found {})",
-							CutsceneTriggerMapObjectResourceId,
-							CutsceneTriggerModelName,
-							modelName != nullptr ? modelName : "<null>"
-						);
-						cutsceneMapObjectValidationFailureLogged = true;
-					}
-					entry.renderStage =
-						TutorialTriggerRenderStage::WaitingForFieldAssets;
-					return false;
-				}
-				validatedCutsceneMapObjectBdat =
-					tutorialTriggerMapObjectBdat;
-				xenomods::g_Logger->LogInfo(
-					"[Cutscene trigger] Using unused RSC_MapObjList ID {} ({})",
-					CutsceneTriggerMapObjectResourceId,
-					CutsceneTriggerModelName
-				);
+			if(validatedTriggerResourceBdat != tutorialTriggerMapObjectBdat) {
+				validatedTriggerResourceBdat = tutorialTriggerMapObjectBdat;
+				triggerResourceValidation = {};
 			}
-			if(
-				resourceId == LandmarkTriggerMapObjectResourceId
-				&& validatedLandmarkMapObjectBdat
-					!= tutorialTriggerMapObjectBdat
-			) {
+			if(asset.resourceId >= triggerResourceValidation.size()) {
+				entry.renderStage = TutorialTriggerRenderStage::WaitingForFieldAssets;
+				return false;
+			}
+			auto& validation = triggerResourceValidation[asset.resourceId];
+			if(validation == 0) {
 				const char* modelName = reinterpret_cast<const char*>(
 					Bdat::getVal(
 						tutorialTriggerMapObjectBdat,
 						"Model",
-						LandmarkTriggerMapObjectResourceId
+						asset.resourceId
 					)
 				);
-				if(
-					modelName == nullptr
-					|| std::strcmp(modelName, LandmarkTriggerModelName) != 0
-				) {
-					if(!landmarkMapObjectValidationFailureLogged) {
-						xenomods::g_Logger->LogWarning(
-							"[Landmark trigger] RSC_MapObjList ID {} is not the reserved {} slot (found {})",
-							LandmarkTriggerMapObjectResourceId,
-							LandmarkTriggerModelName,
-							modelName != nullptr ? modelName : "<null>"
-						);
-						landmarkMapObjectValidationFailureLogged = true;
-					}
-					entry.renderStage =
-						TutorialTriggerRenderStage::WaitingForFieldAssets;
-					return false;
+				validation =
+					modelName != nullptr
+					&& std::strcmp(modelName, asset.modelName) == 0
+						? 1
+						: 2;
+				if(validation == 1) {
+					xenomods::g_Logger->LogInfo(
+						"[Trigger renderer] Using unused RSC_MapObjList ID {} ({})",
+						asset.resourceId,
+						asset.modelName
+					);
+				} else {
+					xenomods::g_Logger->LogWarning(
+						"[Trigger renderer] RSC_MapObjList ID {} expected {} but found {}",
+						asset.resourceId,
+						asset.modelName,
+						modelName != nullptr ? modelName : "<null>"
+					);
 				}
-				validatedLandmarkMapObjectBdat =
-					tutorialTriggerMapObjectBdat;
-				xenomods::g_Logger->LogInfo(
-					"[Landmark trigger] Using unused RSC_MapObjList ID {} ({})",
-					LandmarkTriggerMapObjectResourceId,
-					LandmarkTriggerModelName
-				);
+			}
+			if(validation != 1) {
+				entry.renderStage = TutorialTriggerRenderStage::WaitingForFieldAssets;
+				return false;
 			}
 
 			gf::GfInitParamGimmick parameters {};
@@ -1296,7 +1618,7 @@ namespace {
 			// the object stores the address point at the first virtual function.
 			parameters.vtable = gimmickVtable + 2;
 			parameters.objectType = 8;
-			parameters.resourceId = resourceId;
+			parameters.resourceId = asset.resourceId;
 			parameters.resourceBdat = &tutorialTriggerMapObjectBdat;
 			parameters.field20 = -1;
 			parameters.field28 = -1;
@@ -1327,14 +1649,14 @@ namespace {
 		TriggerEntry& entry,
 		bool allowCreate,
 		float triggerAlpha,
-		unsigned int resourceId
+		const TriggerModelAsset& asset
 	) {
 		if(!entry.hasShape)
 			return;
 
 		if(entry.model == nullptr) {
 			if(allowCreate)
-				CreateTriggerModel(entry, resourceId);
+				CreateTriggerModel(entry, asset);
 			return;
 		}
 
@@ -1390,7 +1712,7 @@ namespace {
 		// Preserve oj900401's authored center, including Y 0.96. Its reported
 		// decoded visible vertices span exactly 1.92 units on every axis, so
 		// use that measured extent for scale calibration.
-		const glm::vec3 sourceExtent(1.92f);
+		const glm::vec3 sourceExtent = asset.sourceExtent;
 		const glm::vec3 sourceCenter = (minimum + maximum) * 0.5f;
 		const glm::vec3 desiredSize = entry.size;
 		const glm::vec3 scale = desiredSize / sourceExtent;
@@ -1457,11 +1779,17 @@ namespace {
 		TutorialTriggerEntry& entry,
 		bool allowCreate
 	) {
+		const auto& asset = SelectTriggerAsset(
+			entry.primitiveType,
+			TutorialBoxAsset,
+			TutorialSphereAsset,
+			TutorialCapsuleAsset
+		);
 		UpdateTriggerModel(
 			entry,
 			allowCreate,
 			TutorialTriggerAlpha,
-			TutorialTriggerMapObjectResourceId
+			asset
 		);
 	}
 
@@ -1504,6 +1832,12 @@ namespace {
 		bool createdModel = false;
 		for(std::size_t i = 0; i < cutsceneTriggerCount; i++) {
 			auto& entry = cutsceneTriggers[i];
+			const auto& asset = SelectTriggerAsset(
+				entry.primitiveType,
+				CutsceneBoxAsset,
+				CutsceneSphereAsset,
+				CutsceneCapsuleAsset
+			);
 			if(entry.modelNameChecked && !entry.modelNameValid)
 				continue;
 			const bool canCreate = !createdModel && entry.model == nullptr;
@@ -1511,7 +1845,7 @@ namespace {
 				entry,
 				canCreate,
 				CutsceneTriggerAlpha,
-				CutsceneTriggerMapObjectResourceId
+				asset
 			);
 			if(canCreate && entry.model != nullptr)
 				createdModel = true;
@@ -1532,11 +1866,11 @@ namespace {
 					entry.modelNameValid =
 						std::strstr(
 							entry.actualModelName,
-							CutsceneTriggerModelName
+							asset.modelName
 						) != nullptr;
 					xenomods::g_Logger->LogInfo(
 						"[Cutscene trigger] Requested {}, created {} ({})",
-						CutsceneTriggerModelName,
+						asset.modelName,
 						entry.actualModelName,
 						entry.modelNameValid ? "verified" : "rejected"
 					);
@@ -1554,6 +1888,12 @@ namespace {
 		bool createdModel = false;
 		for(std::size_t i = 0; i < landmarkTriggerCount; i++) {
 			auto& entry = landmarkTriggers[i];
+			const auto& asset = SelectTriggerAsset(
+				entry.primitiveType,
+				LandmarkBoxAsset,
+				LandmarkSphereAsset,
+				LandmarkCapsuleAsset
+			);
 			if(entry.modelNameChecked && !entry.modelNameValid)
 				continue;
 			const bool canCreate = !createdModel && entry.model == nullptr;
@@ -1561,7 +1901,7 @@ namespace {
 				entry,
 				canCreate,
 				LandmarkTriggerAlpha,
-				LandmarkTriggerMapObjectResourceId
+				asset
 			);
 			if(canCreate && entry.model != nullptr)
 				createdModel = true;
@@ -1582,17 +1922,165 @@ namespace {
 					entry.modelNameValid =
 						std::strstr(
 							entry.actualModelName,
-							LandmarkTriggerModelName
+							asset.modelName
 						) != nullptr;
 					xenomods::g_Logger->LogInfo(
 						"[Landmark trigger] Requested {}, created {} ({})",
-						LandmarkTriggerModelName,
+						asset.modelName,
 						entry.actualModelName,
 						entry.modelNameValid ? "verified" : "rejected"
 					);
 					if(!entry.modelNameValid)
 						DestroyLandmarkTriggerModel(entry);
 				}
+			}
+		}
+	}
+
+	void UpdateCollectionPointModels() {
+		if(!xenomods::DebugStuff::renderCollectionPointRange)
+			return;
+
+		mm::Vec3 playerPositionMm {};
+		float playerRotation = 0.0f;
+		bool playerPositionValid = false;
+		auto leader = gf::GfGameParty::getLeader();
+		if(
+			leader != nullptr
+			&& leader != reinterpret_cast<gf::GF_OBJ_HANDLE*>(-1)
+		) {
+			gf::GfObjAcc playerAccessor(leader);
+			playerPositionValid =
+				playerAccessor.getObjPosRot(
+					playerPositionMm,
+					playerRotation
+				);
+		}
+		const glm::vec3 playerPosition = playerPositionMm;
+
+		std::size_t nearestMissing = collectionPointCount;
+		float nearestMissingDistanceSquared =
+			CollectionPointRenderDistance
+			* CollectionPointRenderDistance;
+		nearestCollectionPointDistance = -1.0f;
+		nearbyCollectionPointCount = 0;
+
+		for(std::size_t i = 0; i < collectionPointCount; i++) {
+			auto& entry = collectionPoints[i];
+			CaptureCollectionPoint(entry.collection);
+			if(!entry.hasShape) {
+				if(
+					entry.model != nullptr
+					&& entry.model
+						!= reinterpret_cast<gf::GF_OBJ_HANDLE*>(-1)
+				) {
+					gf::GfObjAcc accessor(entry.model);
+					accessor.setDisp(gf::OBJDISP::Normal, false);
+					accessor.setDisp(gf::OBJDISP::Event, false);
+					accessor.setDisp(gf::OBJDISP::Field, false);
+				}
+				continue;
+			}
+
+			const glm::mat4 triggerTransform = entry.transform;
+			const glm::vec3 pointPosition =
+				glm::vec3(triggerTransform[3]);
+			const float distanceSquared = playerPositionValid
+				? glm::dot(
+					pointPosition - playerPosition,
+					pointPosition - playerPosition
+				)
+				: 0.0f;
+			const bool nearby =
+				!playerPositionValid
+				|| distanceSquared
+					<= CollectionPointRenderDistance
+						* CollectionPointRenderDistance;
+			if(!nearby) {
+				if(
+					entry.model != nullptr
+					&& entry.model
+						!= reinterpret_cast<gf::GF_OBJ_HANDLE*>(-1)
+				) {
+					gf::GfObjAcc accessor(entry.model);
+					accessor.setDisp(gf::OBJDISP::Normal, false);
+					accessor.setDisp(gf::OBJDISP::Event, false);
+					accessor.setDisp(gf::OBJDISP::Field, false);
+				}
+				continue;
+			}
+
+			nearbyCollectionPointCount++;
+			if(
+				entry.model == nullptr
+				&& (
+					nearestMissing == collectionPointCount
+					|| distanceSquared < nearestMissingDistanceSquared
+				)
+			) {
+				nearestMissing = i;
+				nearestMissingDistanceSquared = distanceSquared;
+			}
+		}
+
+		if(nearestMissing != collectionPointCount) {
+			auto& entry = collectionPoints[nearestMissing];
+			UpdateTriggerModel(
+				entry,
+				true,
+				CollectionPointRangeAlpha,
+				CollectionPointCylinderAsset
+			);
+			nearestCollectionPointRenderStage = entry.renderStage;
+			nearestCollectionPointDistance =
+				playerPositionValid
+					? std::sqrt(nearestMissingDistanceSquared)
+					: 0.0f;
+		} else {
+			nearestCollectionPointRenderStage =
+				TutorialTriggerRenderStage::WaitingForTrigger;
+		}
+
+		for(std::size_t i = 0; i < collectionPointCount; i++) {
+			auto& entry = collectionPoints[i];
+			if(!entry.hasShape || entry.model == nullptr)
+				continue;
+
+			const glm::mat4 triggerTransform = entry.transform;
+			const glm::vec3 pointPosition =
+				glm::vec3(triggerTransform[3]);
+			const float distanceSquared = playerPositionValid
+				? glm::dot(
+					pointPosition - playerPosition,
+					pointPosition - playerPosition
+				)
+				: 0.0f;
+			if(
+				playerPositionValid
+				&& distanceSquared
+					> CollectionPointRenderDistance
+						* CollectionPointRenderDistance
+			)
+				continue;
+
+			UpdateTriggerModel(
+				entry,
+				false,
+				CollectionPointRangeAlpha,
+				CollectionPointCylinderAsset
+			);
+			if(
+				nearestCollectionPointDistance < 0.0f
+				|| distanceSquared
+					< nearestCollectionPointDistance
+						* nearestCollectionPointDistance
+			) {
+				nearestCollectionPointDistance =
+					playerPositionValid
+						? std::sqrt(distanceSquared)
+						: 0.0f;
+				nearestCollectionPointRenderStage =
+					entry.renderStage;
 			}
 		}
 	}
@@ -1817,6 +2305,59 @@ namespace {
 		}
 	};
 
+	struct CollectionUpdateHook
+		: skylaunch::hook::Trampoline<CollectionUpdateHook> {
+		static void Hook(void* collection, float deltaTime) {
+			CaptureCollectionPoint(collection);
+			Orig(collection, deltaTime);
+			CaptureCollectionPoint(collection);
+		}
+	};
+
+	struct AccessPluginSetupHook
+		: skylaunch::hook::Trampoline<AccessPluginSetupHook> {
+		static std::uint64_t Hook(
+			void* plugin,
+			gf::GfComBehaviorPc* behavior
+		) {
+			const std::uint64_t result = Orig(plugin, behavior);
+			CaptureCollectionAccessResource(plugin);
+			return result;
+		}
+	};
+
+	struct AccessPluginUpdateHook
+		: skylaunch::hook::Trampoline<AccessPluginUpdateHook> {
+		static void Hook(
+			void* plugin,
+			gf::GfComBehaviorPc* behavior,
+			const fw::UpdateInfo* updateInfo
+		) {
+			// setup() may run before xenomods installs its hooks. update() is
+			// continuous, so this reliably recovers the already-initialized
+			// resource used by the visible A-button prompt.
+			CaptureCollectionAccessResource(plugin);
+			Orig(plugin, behavior, updateInfo);
+			CaptureCollectionAccessResource(plugin);
+		}
+	};
+
+	struct AccessRangeHook
+		: skylaunch::hook::Trampoline<AccessRangeHook> {
+		static bool Hook(
+			gf::GfComPropertyPc* property,
+			const CollectionAccessParam& param,
+			gf::GF_OBJ_HANDLE* target
+		) {
+			CaptureCollectionAccessParam(&param);
+			const bool inside = Orig(property, param, target);
+			auto entry = FindCollectionPoint(target);
+			if(entry != nullptr)
+				entry->inside = inside;
+			return inside;
+		}
+	};
+
 	struct TitleSkipEventHook : skylaunch::hook::Trampoline<TitleSkipEventHook> {
 		static void Hook(void* state, tl::TitleMain* titleMain) {
 			if(!reloadPrimarySavePending) {
@@ -1961,8 +2502,10 @@ namespace xenomods {
 	bool DebugStuff::renderTutorialTrigger = false;
 	bool DebugStuff::renderCutsceneTrigger = false;
 	bool DebugStuff::renderLandmarkTrigger = false;
+	bool DebugStuff::renderCollectionPointRange = false;
 	bool DebugStuff::traceLocalGameFlags = false;
 	bool DebugStuff::traceTutorialCallSites = false;
+	bool DebugStuff::showTriggerVisualizer = false;
 
 	std::int8_t DebugStuff::pauseStepForward = 0;
 	int DebugStuff::tempInt = 0;
@@ -2565,6 +3108,292 @@ namespace xenomods {
 #endif
 	}
 
+	void DebugStuff::CollectionPointToolsMenuSection() {
+#if XENOMODS_OLD_ENGINE
+		if(
+			ImGui::Checkbox(
+				"Render collection-point interaction ranges",
+				&DebugStuff::renderCollectionPointRange
+			)
+		)
+			ResetCollectionPointVisualization();
+
+		ImGui::TextWrapped(
+			"Displays the A-button access range for collection points as "
+			"pink vertical cylinders. Radius and asymmetric vertical limits "
+			"come from XC2's live AccessParam."
+		);
+		ImGui::Text(
+			"Collection points found: %zu",
+			collectionPointCount
+		);
+		if(collectionAccessParamValid) {
+			ImGui::Text(
+				"Access range: R %.2f, up %.2f, down %.2f",
+				collectionAccessParam.radius,
+				collectionAccessParam.upperHeight,
+				collectionAccessParam.lowerHeight
+			);
+		} else {
+			ImGui::Text(
+				"Access range: fallback R %.2f, up %.2f, down %.2f",
+				CollectionPointFallbackRadius,
+				CollectionPointFallbackUpperHeight,
+				CollectionPointFallbackLowerHeight
+			);
+		}
+
+		std::size_t shapedCount = 0;
+		std::size_t modelCount = 0;
+		for(std::size_t i = 0; i < collectionPointCount; i++) {
+			if(collectionPoints[i].hasShape)
+				shapedCount++;
+			if(
+				collectionPoints[i].model != nullptr
+				&& collectionPoints[i].model
+					!= reinterpret_cast<gf::GF_OBJ_HANDLE*>(-1)
+			)
+				modelCount++;
+		}
+		ImGui::Text(
+			"Ranges ready: %zu, models: %zu",
+			shapedCount,
+			modelCount
+		);
+		ImGui::Text(
+			"Nearby (%.0fm): %zu",
+			CollectionPointRenderDistance,
+			nearbyCollectionPointCount
+		);
+		if(nearestCollectionPointDistance >= 0.0f) {
+			ImGui::Text(
+				"Nearest: %.2fm - %s",
+				nearestCollectionPointDistance,
+				GetTriggerRenderStageName(
+					nearestCollectionPointRenderStage
+				)
+			);
+		} else {
+			ImGui::Text(
+				"Nearest: none - %s",
+				GetTriggerRenderStageName(
+					nearestCollectionPointRenderStage
+				)
+			);
+		}
+#endif
+	}
+
+	void DebugStuff::TriggerTopBarButton() {
+#if XENOMODS_OLD_ENGINE
+		if(
+			ImGui::MenuItem(
+				"Triggers",
+				nullptr,
+				showTriggerVisualizer
+			)
+		)
+		{
+			showTriggerVisualizer = !showTriggerVisualizer;
+			toolwindow::SetVisible(
+				toolwindow::StackSlot::TriggerVisualizer,
+				showTriggerVisualizer
+			);
+		}
+#endif
+	}
+
+	void DebugStuff::TriggerVisualizerWindow() {
+#if XENOMODS_OLD_ENGINE
+		toolwindow::SetVisible(
+			toolwindow::StackSlot::TriggerVisualizer,
+			showTriggerVisualizer
+		);
+		if(!showTriggerVisualizer)
+			return;
+
+		toolwindow::SetStackedPosition(
+			toolwindow::StackSlot::TriggerVisualizer
+		);
+		toolwindow::SetCompactWidth();
+		if(
+			!ImGui::Begin(
+				"Trigger Visualizer",
+				&showTriggerVisualizer,
+				ImGuiWindowFlags_AlwaysAutoResize
+			)
+		) {
+			toolwindow::RecordCurrentHeight(
+				toolwindow::StackSlot::TriggerVisualizer
+			);
+			toolwindow::SetVisible(
+				toolwindow::StackSlot::TriggerVisualizer,
+				showTriggerVisualizer
+			);
+			ImGui::End();
+			return;
+		}
+
+		if(ImGui::BeginTabBar("TriggerVisualizerTabs")) {
+			if(ImGui::BeginTabItem("Render")) {
+				if(
+					ImGui::Checkbox(
+						"Tutorial triggers - red",
+						&renderTutorialTrigger
+					)
+				)
+					ResetTutorialTriggerVisualization();
+				if(
+					ImGui::Checkbox(
+						"Cutscene triggers - light blue",
+						&renderCutsceneTrigger
+					)
+				)
+					ResetCutsceneTriggerVisualization();
+				if(
+					ImGui::Checkbox(
+						"Landmark triggers - yellow",
+						&renderLandmarkTrigger
+					)
+				)
+					ResetLandmarkTriggerVisualization();
+				if(
+					ImGui::Checkbox(
+						"Collection-point ranges - pink",
+						&renderCollectionPointRange
+					)
+				)
+					ResetCollectionPointVisualization();
+				ImGui::EndTabItem();
+			}
+
+			if(ImGui::BeginTabItem("Tutorials")) {
+				if(
+					ImGui::Checkbox(
+						"Repeat tutorials",
+						&repeatTutorialFlag
+					)
+				)
+					ResetTutorialRepeatCycle();
+				if(
+					ImGui::Checkbox(
+						"Pause repeat until outside trigger",
+						&pauseTutorialRepeatUntilExit
+					)
+				)
+					ResetTutorialRepeatCycle();
+				ImGui::EndTabItem();
+			}
+
+			if(ImGui::BeginTabItem("Debug")) {
+				const std::size_t totalTriggers =
+					tutorialTriggerCount
+					+ cutsceneTriggerCount
+					+ landmarkTriggerCount
+					+ collectionPointCount;
+				std::size_t loadedTriggers = 0;
+				std::size_t renderedModels = 0;
+				std::size_t activeTriggers = 0;
+
+				for(std::size_t i = 0; i < tutorialTriggerCount; i++) {
+					if(tutorialTriggers[i].hasShape)
+						loadedTriggers++;
+					if(
+						tutorialTriggers[i].renderStage
+							== TutorialTriggerRenderStage::Rendering
+					)
+						renderedModels++;
+					if(tutorialTriggers[i].inside)
+						activeTriggers++;
+				}
+				for(std::size_t i = 0; i < cutsceneTriggerCount; i++) {
+					if(cutsceneTriggers[i].hasShape)
+						loadedTriggers++;
+					if(
+						cutsceneTriggers[i].renderStage
+							== TutorialTriggerRenderStage::Rendering
+					)
+						renderedModels++;
+					if(cutsceneTriggers[i].inside)
+						activeTriggers++;
+				}
+				for(std::size_t i = 0; i < landmarkTriggerCount; i++) {
+					if(landmarkTriggers[i].hasShape)
+						loadedTriggers++;
+					if(
+						landmarkTriggers[i].renderStage
+							== TutorialTriggerRenderStage::Rendering
+					)
+						renderedModels++;
+					if(landmarkTriggers[i].inside)
+						activeTriggers++;
+				}
+				for(std::size_t i = 0; i < collectionPointCount; i++) {
+					if(collectionPoints[i].hasShape)
+						loadedTriggers++;
+					if(
+						collectionPoints[i].renderStage
+							== TutorialTriggerRenderStage::Rendering
+					)
+						renderedModels++;
+					if(collectionPoints[i].inside)
+						activeTriggers++;
+				}
+
+				ImGui::Text("Total triggers        %zu", totalTriggers);
+				ImGui::Text("Loaded triggers       %zu", loadedTriggers);
+				ImGui::Text("Active triggers       %zu", activeTriggers);
+				ImGui::Text("Rendered models       %zu", renderedModels);
+				ImGui::Separator();
+
+				if(activeTriggers == 0) {
+					ImGui::TextDisabled("Active trigger         none");
+				} else {
+					for(std::size_t i = 0; i < tutorialTriggerCount; i++) {
+						if(tutorialTriggers[i].inside)
+							ImGui::Text(
+								"Active trigger         (Tutorial) %d",
+								tutorialTriggers[i].flagId
+							);
+					}
+					for(std::size_t i = 0; i < cutsceneTriggerCount; i++) {
+						if(cutsceneTriggers[i].inside)
+							ImGui::Text(
+								"Active trigger         (Cutscene) %d",
+								cutsceneTriggers[i].eventId
+							);
+					}
+					for(std::size_t i = 0; i < landmarkTriggerCount; i++) {
+						if(landmarkTriggers[i].inside)
+							ImGui::Text(
+								"Active trigger         (Landmark) %d",
+								landmarkTriggers[i].landmarkId
+							);
+					}
+					for(std::size_t i = 0; i < collectionPointCount; i++) {
+						if(collectionPoints[i].inside)
+							ImGui::Text(
+								"Active trigger         (Collection) %d",
+								collectionPoints[i].collectionId
+							);
+					}
+				}
+				ImGui::EndTabItem();
+			}
+			ImGui::EndTabBar();
+		}
+
+		toolwindow::RecordCurrentHeight(
+			toolwindow::StackSlot::TriggerVisualizer
+		);
+		toolwindow::SetVisible(
+			toolwindow::StackSlot::TriggerVisualizer,
+			showTriggerVisualizer
+		);
+		ImGui::End();
+#endif
+	}
+
 	void DebugStuff::Initialize() {
 		UpdatableModule::Initialize();
 		g_Logger->LogDebug("Setting up debug stuff...");
@@ -2580,6 +3409,16 @@ namespace xenomods {
 		TutorialUpdateHook::HookAt("_ZN3gmk11GmkTutorial6updateEf");
 		CutsceneEventUpdateHook::HookAt("_ZN3gmk8GmkEvent6updateEf");
 		LandmarkUpdateHook::HookAt("_ZN3gmk11GmkLandmark6updateEf");
+		CollectionUpdateHook::HookAt("_ZN3gmk13GmkCollection6updateEf");
+		AccessPluginSetupHook::HookAt(
+			"_ZN2gf2pc12AccessPlugin5setupERNS_15GfComBehaviorPcE"
+		);
+		AccessPluginUpdateHook::HookAt(
+			"_ZN2gf2pc12AccessPlugin6updateERNS_15GfComBehaviorPcERKN2fw10UpdateInfoE"
+		);
+		AccessRangeHook::HookAt(
+			"_ZN2gf2pc13isActiveRangeERNS_15GfComPropertyPcERKNS_11AccessParamEPNS_13GF_OBJ_HANDLEE"
+		);
 		TitleSkipEventHook::HookAt(
 			"_ZN2tl20TitleStateMainScreen14playTitleEventEPNS_9TitleMainE"
 		);
@@ -2600,15 +3439,15 @@ namespace xenomods {
 		AlwaysAbleToOpenMenu::HookAt(&game::DataUtil::isDisableMenu);
 #endif
 
-		auto modules = g_Menu->FindSection("modules");
-		if(modules != nullptr) {
-			auto section = modules->RegisterSection(STRINGIFY(DebugStuff), "Debug Stuff");
-			section->RegisterRenderCallback(&MenuSection);
-		}
-
 		UpdateDebugRendering();
 
 		xenomods::g_Menu->RegisterRenderCallback(&DebugStuff::MemoryDebugRendering, false);
+#if XENOMODS_OLD_ENGINE
+		xenomods::g_Menu->RegisterRenderCallback(
+			&DebugStuff::TriggerVisualizerWindow,
+			true
+		);
+#endif
 	}
 
 	void DebugStuff::Update(fw::UpdateInfo* updateInfo) {
@@ -2618,6 +3457,7 @@ namespace xenomods {
 		UpdateTutorialTriggerModels();
 		UpdateCutsceneTriggerModels();
 		UpdateLandmarkTriggerModels();
+		UpdateCollectionPointModels();
 #endif
 
 		if(pauseEnable && pauseStepForward > 0) {
@@ -2630,6 +3470,7 @@ namespace xenomods {
 		ClearTutorialTriggerRegistry();
 		ClearCutsceneTriggerRegistry();
 		ClearLandmarkTriggerRegistry();
+		ClearCollectionPointRegistry();
 #endif
 	}
 

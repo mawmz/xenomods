@@ -230,14 +230,6 @@ namespace xenomods {
 		IDCountOverride::HookAt(&Bdat::getIdCount);
 		IDEndOverride::HookAt(&Bdat::getIdEnd);
 
-#if !XENOMODS_CODENAME(bf3)
-		auto modules = g_Menu->FindSection("modules");
-		if(modules != nullptr) {
-			auto section = modules->RegisterSection(STRINGIFY(BdatOverride), "BDAT Overrides");
-			section->RegisterRenderCallback(&MenuSection);
-		}
-#endif
-
 		LoadFromFile();
 	}
 

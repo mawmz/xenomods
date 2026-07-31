@@ -3,9 +3,11 @@
 #include <skylaunch/hookng/Hooks.hpp>
 #include <xenomods/DebugWrappers.hpp>
 #include <xenomods/HidInput.hpp>
+#include <xenomods/InputBuffer.hpp>
 #include <xenomods/Logger.hpp>
 #include <xenomods/NnFile.hpp>
 #include <xenomods/State.hpp>
+#include <xenomods/UtilityMenu.hpp>
 #include <xenomods/Version.hpp>
 #include <xenomods/menu/Menu.hpp>
 
@@ -59,7 +61,9 @@ namespace xenomods {
 	void main() {
 		NN_DIAG_LOG(nn::diag::LogSeverity::Info, "Running %s", version::XenomodsFullVersion());
 		g_Menu->Initialize();
+		UtilityMenu::Initialize();
 		InitializeAllRegisteredModules();
+		InputBuffer::Initialize();
 
 		FunctionalHooks::Hook();
 	}

@@ -16,8 +16,10 @@ namespace xenomods {
 		static bool renderTutorialTrigger;
 		static bool renderCutsceneTrigger;
 		static bool renderLandmarkTrigger;
+		static bool renderCollectionPointRange;
 		static bool traceLocalGameFlags;
 		static bool traceTutorialCallSites;
+		static bool showTriggerVisualizer;
 
 		static std::int8_t pauseStepForward;
 		static int tempInt;
@@ -46,6 +48,9 @@ namespace xenomods {
 		static void TutorialToolsMenuSection();
 		static void CutsceneTriggerToolsMenuSection();
 		static void LandmarkTriggerToolsMenuSection();
+		static void CollectionPointToolsMenuSection();
+		static void TriggerTopBarButton();
+		static void TriggerVisualizerWindow();
 
 		void Initialize() override;
 		bool NeedsUpdate() const override {

@@ -96,19 +96,6 @@ namespace xenomods {
 		ImGui::Checkbox("Disable low tension/death BGM change", &disableTensionBGM);
 #endif
 
-		static float partyGauge = 3.f;
-		ImGui::PushItemWidth(ImGui::GetFrameHeight() * 5.f);
-		ImGui::SliderFloat("Sections", &partyGauge, 0.f, 3.f);
-		ImGui::SameLine();
-		if (ImGui::Button("Set Party Gauge")) {
-#if XENOMODS_OLD_ENGINE
-			gf::GfGameParty::setPartyGauge(partyGauge * 100);
-#elif XENOMODS_CODENAME(bfsw)
-			if (xenomods::DocumentPtr != nullptr)
-				game::ObjUtil::setPartyGauge(*xenomods::DocumentPtr, partyGauge * 100);
-#endif
-		}
-		ImGui::PopItemWidth();
 	}
 
 	void BattleCheats::Initialize() {
@@ -127,11 +114,6 @@ namespace xenomods {
 		DisableTensionBGM::HookAt("_ZNK4game3BGM15testTensionZeroERKNS_14GameControllerE");
 #endif
 
-		auto modules = g_Menu->FindSection("modules");
-		if(modules != nullptr) {
-			auto section = modules->RegisterSection(STRINGIFY(BattleCheats), "Battle Cheats");
-			section->RegisterRenderCallback(&MenuSection);
-		}
 	}
 
 	void BattleCheats::OnConfigUpdate() {

@@ -1,8 +1,12 @@
 #include "PlayerMovement.hpp"
 #include "CameraTools.hpp"
 #include "DebugStuff.hpp"
+#include "ToolWindowLayout.hpp"
+
+#include <algorithm>
 
 #include "xenomods/ImGuiExtensions.hpp"
+#include "xenomods/InputBuffer.hpp"
 #include "xenomods/engine/fw/Collision.hpp"
 #include "xenomods/engine/fw/Document.hpp"
 #include "xenomods/engine/fw/UpdateInfo.hpp"
@@ -16,15 +20,17 @@
 #include "xenomods/stuff/utils/util.hpp"
 
 namespace {
-
 #if XENOMODS_OLD_ENGINE
 	glm::vec3 measuredPlayerVelocity {};
 	glm::vec3 previousPlayerPosition {};
 	bool hasPreviousPlayerPosition = false;
 	bool playerMovementStateValid = false;
 	bool playerWallContactValid = false;
+	bool playerCollisionStateValid = false;
 	bool playerAirborne = false;
 	bool playerWallContact = false;
+	bool playerGroundCollision = false;
+	bool playerCharacterCollision = false;
 #endif
 
 #if XENOMODS_CODENAME(bf2)
@@ -154,7 +160,6 @@ namespace xenomods {
 	bool PlayerMovement::ShowAllWarps = false;
 	bool PlayerMovement::ShowWarpsOnMap = false;
 	bool PlayerMovement::ShowPlayerTelemetry = false;
-	bool PlayerMovement::PersistPlayerTelemetry = false;
 
 	glm::vec3* PlayerMovement::GetPartyPosition() {
 #if XENOMODS_OLD_ENGINE
@@ -588,45 +593,9 @@ namespace xenomods {
 	}
 
 	void PlayerMovement::MenuSection() {
-		ImGui::MenuItem("Show Warps Window", "", &ShowWarpsWindow);
-		if(ImGui::Checkbox("Player telemetry overlay", &ShowPlayerTelemetry)) {
-			if(PersistPlayerTelemetry) {
-				const auto path = fmt::format(
-					XENOMODS_CONFIG_PATH "/{}/playerTelemetry.toml",
-					XENOMODS_CODENAME_STR
-				);
-				const auto out = fmt::format(
-					"persist = true\nvisible = {}\n",
-					ShowPlayerTelemetry
-				);
-				if(NnFile::Preallocate(path, out.size())) {
-					NnFile file(path, nn::fs::OpenMode_Write);
-					file.Write(out.c_str(), out.size());
-					file.Flush();
-				}
-			}
-		}
-		if(
-			ImGui::Checkbox(
-				"Remember telemetry setting",
-				&PersistPlayerTelemetry
-			)
-		) {
-			const auto path = fmt::format(
-				XENOMODS_CONFIG_PATH "/{}/playerTelemetry.toml",
-				XENOMODS_CODENAME_STR
-			);
-			const auto out = fmt::format(
-				"persist = {}\nvisible = {}\n",
-				PersistPlayerTelemetry,
-				ShowPlayerTelemetry
-			);
-			if(NnFile::Preallocate(path, out.size())) {
-				NnFile file(path, nn::fs::OpenMode_Write);
-				file.Write(out.c_str(), out.size());
-				file.Flush();
-			}
-		}
+		if(ImGui::CollapsingHeader("Input Buffer", ImGuiTreeNodeFlags_DefaultOpen))
+			InputBuffer::DrawMenu();
+		ImGui::Separator();
 		ImGui::Checkbox("Disable fall damage", &disableFallDamage);
 		ImGui::PushItemWidth(150.f);
 		imguiext::InputFloatExt("Movement speed multiplier", &movementSpeedMult, 1.f, 5.f, 2.f, "%.2f");
@@ -640,95 +609,162 @@ namespace xenomods {
 		ImGui::Text("Current vel: %s", MenuCurrentPlayerVelocity().c_str());
 	}
 
-	void MenuDrawWarp(PlayerMovement::WarpData* warp) {
+	bool MenuDrawWarp(PlayerMovement::WarpData* warp) {
 		ImGui::Text("Map: %s", warp->mapName.c_str());
+		ImGui::PushItemWidth(190.f);
 		ImGui::DragFloat3("Position", reinterpret_cast<float*>(&warp->position));
 		if(ImGui::DragFloat3("Rotation", reinterpret_cast<float*>(&warp->rotationEuler)))
 			warp->rotation = glm::quat(glm::radians(warp->rotationEuler));
 		ImGui::DragFloat3("Velocity", reinterpret_cast<float*>(&warp->velocity));
 		if(warp->hasCameraPosition)
 			ImGui::DragFloat3(
-				"Camera Position",
+				"Camera",
 				reinterpret_cast<float*>(&warp->cameraPosition)
 			);
 		else
-			ImGui::TextDisabled("Camera Position: not saved");
+			ImGui::TextDisabled("Camera: not saved");
+		ImGui::PopItemWidth();
 
 		if(ImGui::Button("Go To Warp"))
 			PlayerMovement::GoToWarp(warp);
 		ImGui::SameLine();
-		if(ImGui::Button("Overwrite Warp"))
+		if(ImGui::Button("Update"))
 			PlayerMovement::SetWarp(warp);
 		ImGui::SameLine();
-		if(ImGui::Button("Delete Warp"))
-			PlayerMovement::DeleteWarp(warp);
+		return ImGui::Button("Delete");
 	}
 
 	void PlayerMovement::MenuWarps() {
+		toolwindow::SetVisible(
+			toolwindow::StackSlot::Warps,
+			ShowWarpsWindow
+		);
 		if(!ShowWarpsWindow)
 			return;
 
+		toolwindow::SetStackedPosition(toolwindow::StackSlot::Warps);
+		toolwindow::SetCompactWidth();
 		if(!ImGui::Begin("Warps", &ShowWarpsWindow, ImGuiWindowFlags_AlwaysAutoResize)) {
+			toolwindow::RecordCurrentHeight(toolwindow::StackSlot::Warps);
+			toolwindow::SetVisible(
+				toolwindow::StackSlot::Warps,
+				ShowWarpsWindow
+			);
 			ImGui::End();
 			return;
 		}
 
-		if(ImGui::Button("Load Warps From File"))
+		static int selectedWarpIndex = -1;
+
+		if(ImGui::Button("Load")) {
 			LoadWarpsFromFile();
+			selectedWarpIndex = Warps.empty() ? -1 : 0;
+		}
 		ImGui::SameLine();
-		if(ImGui::Button("Save Warps To File"))
+		if(ImGui::Button("Save"))
 			SaveWarpsToFile();
-
-		ImGui::Checkbox("Show all warps", &ShowAllWarps);
 		ImGui::SameLine();
-		ImGui::Checkbox("Show warps on map", &ShowWarpsOnMap);
-
-		if(ImGui::BeginTabBar("WarpsBar", ImGuiTabBarFlags_AutoSelectNewTabs | ImGuiTabBarFlags_TabListPopupButton | ImGuiTabBarFlags_FittingPolicyScroll)) {
-			// new warp button
-			if(ImGui::TabItemButton("+", ImGuiTabItemFlags_Trailing | ImGuiTabItemFlags_NoTooltip))
-				NewWarp();
-
-			// draw a tab for each warp
-			for(int n = 0; n < Warps.size();) {
-				WarpData* warp = &Warps[n];
-				bool open = true;
-
-				// disabling show all warps will only show the warps that are active on the current map
-				if(!ShowAllWarps && detail::IsModuleRegistered(STRINGIFY(DebugStuff))) {
-					if(warp->mapId > 0 && warp->mapId != DebugStuff::GetMapId()) {
-						n++;
-						continue;
-					}
-				}
-
-				if(ImGui::BeginTabItem(warp->name.c_str(), &open, ImGuiTabItemFlags_None)) {
-					MenuDrawWarp(warp);
-					ImGui::EndTabItem();
-				}
-
-				if(!open)
-					DeleteWarp(warp);
-				else
-					n++;
-			}
-
-			ImGui::EndTabBar();
+		if(ImGui::Button("+ New")) {
+			NewWarp();
+			selectedWarpIndex =
+				static_cast<int>(Warps.size()) - 1;
 		}
 
+		ImGui::Checkbox("Show all", &ShowAllWarps);
+		ImGui::SameLine();
+		ImGui::Checkbox("Show on map", &ShowWarpsOnMap);
+
+		std::vector<int> visibleWarpIndices;
+		visibleWarpIndices.reserve(Warps.size());
+		for(int index = 0; index < static_cast<int>(Warps.size()); index++) {
+			const auto& warp = Warps[index];
+			if(
+				!ShowAllWarps
+				&& detail::IsModuleRegistered(STRINGIFY(DebugStuff))
+				&& warp.mapId > 0
+				&& warp.mapId != DebugStuff::GetMapId()
+			)
+				continue;
+
+			visibleWarpIndices.push_back(index);
+		}
+
+		if(
+			std::find(
+				visibleWarpIndices.begin(),
+				visibleWarpIndices.end(),
+				selectedWarpIndex
+			) == visibleWarpIndices.end()
+		) {
+			selectedWarpIndex = visibleWarpIndices.empty()
+				? -1
+				: visibleWarpIndices.front();
+		}
+
+		const float listHeight =
+			ImGui::GetTextLineHeightWithSpacing() * 4.f
+				+ ImGui::GetStyle().FramePadding.y * 2.f;
+		if(
+			ImGui::BeginChild(
+				"WarpList",
+				ImVec2(0.f, listHeight),
+				true
+			)
+		) {
+			for(const int index : visibleWarpIndices) {
+				ImGui::PushID(index);
+				if(
+					ImGui::Selectable(
+						Warps[index].name.c_str(),
+						selectedWarpIndex == index
+					)
+				)
+					selectedWarpIndex = index;
+				ImGui::PopID();
+			}
+		}
+		ImGui::EndChild();
+
+		if(
+			selectedWarpIndex >= 0
+			&& selectedWarpIndex < static_cast<int>(Warps.size())
+			&& MenuDrawWarp(&Warps[selectedWarpIndex])
+		) {
+			DeleteWarp(&Warps[selectedWarpIndex]);
+			if(Warps.empty())
+				selectedWarpIndex = -1;
+			else if(selectedWarpIndex >= static_cast<int>(Warps.size()))
+				selectedWarpIndex = static_cast<int>(Warps.size()) - 1;
+		}
+
+		toolwindow::RecordCurrentHeight(toolwindow::StackSlot::Warps);
+		toolwindow::SetVisible(
+			toolwindow::StackSlot::Warps,
+			ShowWarpsWindow
+		);
 		ImGui::End();
 	}
 
 	void PlayerMovement::PlayerTelemetryOverlay() {
+		toolwindow::SetVisible(
+			toolwindow::StackSlot::Telemetry,
+			ShowPlayerTelemetry
+		);
 		if(!ShowPlayerTelemetry)
 			return;
 
-		ImGui::SetNextWindowPos(ImVec2(10.0f, 40.0f), ImGuiCond_FirstUseEver);
+		toolwindow::SetStackedPosition(toolwindow::StackSlot::Telemetry);
+		toolwindow::SetCompactWidth();
 		ImGui::SetNextWindowBgAlpha(0.65f);
 		const ImGuiWindowFlags flags =
 			ImGuiWindowFlags_AlwaysAutoResize
-				| ImGuiWindowFlags_NoCollapse
 				| ImGuiWindowFlags_NoFocusOnAppearing;
 		if(!ImGui::Begin("Player Telemetry", &ShowPlayerTelemetry, flags)) {
+			toolwindow::RecordCurrentHeight(toolwindow::StackSlot::Telemetry);
+			toolwindow::SetVisible(
+				toolwindow::StackSlot::Telemetry,
+				ShowPlayerTelemetry
+			);
 			ImGui::End();
 			return;
 		}
@@ -793,32 +829,28 @@ namespace xenomods {
 		} else {
 			ImGui::TextUnformatted("Wall contact  unavailable");
 		}
+		if(playerCollisionStateValid) {
+			ImGui::Text(
+				"Collision  ground %s  character %s",
+				playerGroundCollision ? "On" : "Off",
+				playerCharacterCollision ? "On" : "Off"
+			);
+		} else {
+			ImGui::TextUnformatted("Collision  unavailable");
+		}
 #endif
 
+		toolwindow::RecordCurrentHeight(toolwindow::StackSlot::Telemetry);
+		toolwindow::SetVisible(
+			toolwindow::StackSlot::Telemetry,
+			ShowPlayerTelemetry
+		);
 		ImGui::End();
 	}
 
 	void PlayerMovement::Initialize() {
 		UpdatableModule::Initialize();
 		g_Logger->LogDebug("Setting up player movement hooks...");
-
-#if !XENOMODS_CODENAME(bf3)
-		{
-			const auto path = fmt::format(
-				XENOMODS_CONFIG_PATH "/{}/playerTelemetry.toml",
-				XENOMODS_CODENAME_STR
-			);
-			const toml::parse_result settings = toml::parse_file(path);
-			if(settings) {
-				const auto& table = settings.table();
-				PersistPlayerTelemetry =
-					table["persist"].value_or(false);
-				if(PersistPlayerTelemetry)
-					ShowPlayerTelemetry =
-						table["visible"].value_or(false);
-			}
-		}
-#endif
 
 #if XENOMODS_OLD_ENGINE
 		ApplyVelocityChanges::HookAt("_ZN2gf15GfComBehaviorPc19integrateMoveNormalERKN2fw10UpdateInfoERNS_15GfComPropertyPcE");
@@ -839,19 +871,13 @@ namespace xenomods {
 #endif
 
 #if !XENOMODS_CODENAME(bf3) // need to find these for 3
-		auto modules = g_Menu->FindSection("modules");
-		if(modules != nullptr) {
-			auto section = modules->RegisterSection(STRINGIFY(PlayerMovement), "Player Movement");
-			section->RegisterRenderCallback(&MenuSection);
-		}
-
 		auto state = g_Menu->FindSection("state");
 		if(state != nullptr) {
 			state->RegisterRenderCallback(&MenuState);
 		}
 
-		g_Menu->RegisterRenderCallback(&MenuWarps, true);
 		g_Menu->RegisterRenderCallback(&PlayerTelemetryOverlay, true);
+		g_Menu->RegisterRenderCallback(&MenuWarps, true);
 #endif
 	}
 
@@ -882,6 +908,7 @@ namespace xenomods {
 
 		playerWallContact = false;
 		playerWallContactValid = false;
+		playerCollisionStateValid = false;
 		auto leader = gf::GfGameParty::getLeader();
 		if(
 			leader != nullptr
@@ -910,6 +937,13 @@ namespace xenomods {
 						playerWallContact =
 							(*collisionSlot)->isContactWall();
 						playerWallContactValid = true;
+						playerGroundCollision = (*collisionSlot)->testState(
+							fw::ColiState::Ground
+						);
+						playerCharacterCollision = (*collisionSlot)->testState(
+							fw::ColiState::Character
+						);
+						playerCollisionStateValid = true;
 					}
 				}
 			}
@@ -953,6 +987,7 @@ namespace xenomods {
 		hasPreviousPlayerPosition = false;
 		playerMovementStateValid = false;
 		playerWallContactValid = false;
+		playerCollisionStateValid = false;
 #endif
 
 		if(detail::IsModuleRegistered(STRINGIFY(DebugStuff)))

@@ -84,6 +84,8 @@ namespace gf {
 		ObjectType getType() const;
 		bool getObjPosRot(mm::Vec3& pos, float& rot);
 		float getAlphaCamera() const;
+		const mm::Mat44* getWorldTransform() const;
+		float getTargetSearchOffset() const;
 
 		void setDisp(OBJDISP channel, bool displayed);
 		bool isDisp(OBJDISP channel) const;

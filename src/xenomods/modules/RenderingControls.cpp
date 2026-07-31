@@ -69,6 +69,41 @@ namespace {
 				Orig(this_pointer, DrDrawWorkInfoEF, param_2, param_3);
 		}
 	};
+
+#if XENOMODS_CODENAME(bf2)
+	// XC2 stores streamed grass and other decorative vegetation in the MPF
+	// ("map foliage") subsystem. Both the normal and streamed paths have
+	// separate visible and depth-prepass entry points, so suppress all four to
+	// avoid invisible foliage continuing to write depth.
+	struct SkipMpfZPrepassRendering : skylaunch::hook::Trampoline<SkipMpfZPrepassRendering> {
+		static void Hook(void* this_pointer) {
+			if(!xenomods::RenderingControls::disableMapFoliage)
+				Orig(this_pointer);
+		}
+	};
+
+	struct SkipMpfRendering : skylaunch::hook::Trampoline<SkipMpfRendering> {
+		static void Hook(void* this_pointer) {
+			if(!xenomods::RenderingControls::disableMapFoliage)
+				Orig(this_pointer);
+		}
+	};
+
+	struct SkipSeamMpfZPrepassRendering : skylaunch::hook::Trampoline<SkipSeamMpfZPrepassRendering> {
+		static void Hook(void* this_pointer) {
+			if(!xenomods::RenderingControls::disableMapFoliage)
+				Orig(this_pointer);
+		}
+	};
+
+	struct SkipSeamMpfRendering : skylaunch::hook::Trampoline<SkipSeamMpfRendering> {
+		static void Hook(void* this_pointer) {
+			if(!xenomods::RenderingControls::disableMapFoliage)
+				Orig(this_pointer);
+		}
+	};
+
+#endif
 #elif XENOMODS_CODENAME(bfsw)
 	struct SkipParticleRendering : skylaunch::hook::Trampoline<SkipParticleRendering> {
 		static void Hook(xefb::CEParticlelist* this_pointer, xefb::CERes* res) {
@@ -144,6 +179,7 @@ namespace xenomods {
 	bool RenderingControls::skipSkyDomeRendering = false;
 	bool RenderingControls::skipFogRendering = false;
 	bool RenderingControls::skipDepthOfFieldRendering = false;
+	bool RenderingControls::disableMapFoliage = false;
 	bool RenderingControls::enableAutoReduction = true;
 	bool RenderingControls::disableModelFade = false;
 
@@ -154,9 +190,6 @@ namespace xenomods {
 	const std::string toggleKey = std::string(STRINGIFY(RenderingControls)) + "_Toggles";
 
 	void RenderingControls::MenuSection() {
-#if XENOMODS_OLD_ENGINE
-		ImGui::Checkbox("Straighten font", &straightenFont);
-#endif
 #if !XENOMODS_CODENAME(bf3)
 		ImGui::PushItemWidth(150.f);
 		if(ImGui::SliderFloat("Shadow strength", &shadowStrength, -1, 1)) {
@@ -178,7 +211,6 @@ namespace xenomods {
 			}
 		}
 
-		ImGui::Checkbox("Freeze texture streaming", &freezeTextureStreaming);
 #endif
 	}
 
@@ -188,6 +220,11 @@ namespace xenomods {
 		ImGui::Checkbox("Skip sky dome rendering", &skipSkyDomeRendering);
 		ImGui::Checkbox("Skip fog rendering", &skipFogRendering);
 		ImGui::Checkbox("Skip depth of field rendering", &skipDepthOfFieldRendering);
+#if XENOMODS_CODENAME(bf2)
+		ImGui::Checkbox("Disable map foliage", &disableMapFoliage);
+		if(ImGui::IsItemHovered())
+			ImGui::SetTooltip("Hides XC2 MPF vegetation.");
+#endif
 #if !XENOMODS_CODENAME(bf3)
 	#if XENOMODS_OLD_ENGINE
 		ImGui::Checkbox("Skip particle+overlay rendering", &skipParticleRendering);
@@ -212,25 +249,6 @@ namespace xenomods {
 		ImGui::Checkbox("Enable TMAA", &acc.PixlPostParm->enableTMAA);
 		if(ImGui::Checkbox("Enable resolution scaling", &enableAutoReduction))
 			acc.setAutoReduction(enableAutoReduction);
-#endif
-	}
-
-	void RenderingControls::MenuGBuffer() {
-#if !XENOMODS_CODENAME(bf3)
-		auto acc = ml::ScnRenderDrSysParmAcc();
-
-		ImGui::Checkbox("GBuffer debug", &acc.PixlPostParm->GBufferDebug);
-		ImGui::SliderFloat2("Base Color",        acc.PixlPostParm->GBufferDebugParams[0], 0, 1);
-		ImGui::SliderFloat2("Metalness",         acc.PixlPostParm->GBufferDebugParams[1], 0, 1);
-		ImGui::SliderFloat2("Roughness",         acc.PixlPostParm->GBufferDebugParams[2], 0, 1);
-		ImGui::SliderFloat2("Emission",          acc.PixlPostParm->GBufferDebugParams[3], 0, 1);
-		ImGui::SliderFloat2("N/A",               acc.PixlPostParm->GBufferDebugParams[4], 0, 1);
-		ImGui::SliderFloat2("Ambient Occlusion", acc.PixlPostParm->GBufferDebugParams[5], 0, 1);
-		ImGui::SliderFloat2("Emission 2",        acc.PixlPostParm->GBufferDebugParams[6], 0, 1);
-		ImGui::SliderFloat2("Specular",          acc.PixlPostParm->GBufferDebugParams[7], 0, 1);
-
-		if(ImGui::Button("Reset parameters"))
-			acc.setGBuffDebugDefault();
 #endif
 	}
 
@@ -288,23 +306,16 @@ namespace xenomods {
 		SkipParticleRendering::HookAt("_ZN5ptlib15ParticleManager4drawEPKNS_16DrDrawWorkInfoEFEib");
 		DisableFadeMode::HookAt("_ZN2gf8GfObjAcc19setRenderCameraFadeEb");
 		DisableFadeAlpha::HookAt("_ZNK2gf8GfObjAcc17isCameraFadeAllOKEv");
+#if XENOMODS_CODENAME(bf2)
+		SkipMpfZPrepassRendering::HookAt("_ZN2ml11DrMdoCtlMpf18callZPrepassRenderEv");
+		SkipMpfRendering::HookAt("_ZN2ml11DrMdoCtlMpf13callRenderMpfEv");
+		SkipSeamMpfZPrepassRendering::HookAt("_ZN2ml18DrMdoCtlSeamMpfMap28createMpfZPrePassDisplayListEv");
+		SkipSeamMpfRendering::HookAt("_ZN2ml18DrMdoCtlSeamMpfMap20callRenderSeamMpfMapEv");
+#endif
 #elif XENOMODS_CODENAME(bfsw)
 		SkipParticleRendering::HookAt("_ZN4xefb14CEParticlelist4drawEPNS_5CEResE");
 #endif
 
-		auto modules = g_Menu->FindSection("modules");
-		if(modules != nullptr) {
-			auto section = modules->RegisterSection(STRINGIFY(RenderingControls), "Rendering Controls");
-			section->RegisterRenderCallback(&MenuSection);
-
-			auto toggles = section->RegisterSection(toggleKey, "Toggles...");
-			toggles->RegisterRenderCallback(&MenuToggles);
-
-#if !XENOMODS_CODENAME(bf3)
-			auto gbuffer = section->RegisterSection(std::string(STRINGIFY(RenderingControls)) + "gbuffer", "GBuffer debug...");
-			gbuffer->RegisterRenderCallback(&MenuGBuffer);
-#endif
-		}
 	}
 
 	void RenderingControls::Update(fw::UpdateInfo* updateInfo) {

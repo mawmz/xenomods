@@ -12,6 +12,8 @@ add_executable(xenomods
 		xenomods/State.cpp
 		xenomods/Logger.cpp
 		xenomods/HidInput.cpp
+		xenomods/InputBuffer.cpp
+		xenomods/UtilityMenu.cpp
 		xenomods/Version.cpp
 
 		xenomods/menu/Menu.cpp
@@ -22,6 +24,7 @@ add_executable(xenomods
 		xenomods/modules/CameraTools.cpp
 		xenomods/modules/RenderingControls.cpp
 		xenomods/modules/BattleCheats.cpp
+		xenomods/modules/CombatAiDebug.cpp
 		xenomods/modules/PartyEditor.cpp
 		xenomods/modules/PlayerMovement.cpp
 		xenomods/modules/FrameratePatch.cpp
@@ -177,6 +180,27 @@ if(NOT XENOMODS_BF2_BUILD_INDEX EQUAL -1)
 				${PROJECT_SOURCE_DIR}/assets/tutorial_trigger/romfs/model/oj/oj200101.arc
 				${PROJECT_SOURCE_DIR}/assets/tutorial_trigger/romfs/model/oj/oj200101.wimdo
 				${PROJECT_SOURCE_DIR}/assets/tutorial_trigger/romfs/model/oj/oj200101.wismt
+				${PROJECT_SOURCE_DIR}/assets/tutorial_trigger/romfs/model/oj/oj490002.arc
+				${PROJECT_SOURCE_DIR}/assets/tutorial_trigger/romfs/model/oj/oj490002.wimdo
+				${PROJECT_SOURCE_DIR}/assets/tutorial_trigger/romfs/model/oj/oj490002.wismt
+				${PROJECT_SOURCE_DIR}/assets/tutorial_trigger/romfs/model/oj/oj101002.arc
+				${PROJECT_SOURCE_DIR}/assets/tutorial_trigger/romfs/model/oj/oj101002.wimdo
+				${PROJECT_SOURCE_DIR}/assets/tutorial_trigger/romfs/model/oj/oj101002.wismt
+				${PROJECT_SOURCE_DIR}/assets/tutorial_trigger/romfs/model/oj/oj740010.arc
+				${PROJECT_SOURCE_DIR}/assets/tutorial_trigger/romfs/model/oj/oj740010.wimdo
+				${PROJECT_SOURCE_DIR}/assets/tutorial_trigger/romfs/model/oj/oj740010.wismt
+				${PROJECT_SOURCE_DIR}/assets/tutorial_trigger/romfs/model/oj/oj740011.arc
+				${PROJECT_SOURCE_DIR}/assets/tutorial_trigger/romfs/model/oj/oj740011.wimdo
+				${PROJECT_SOURCE_DIR}/assets/tutorial_trigger/romfs/model/oj/oj740011.wismt
+				${PROJECT_SOURCE_DIR}/assets/tutorial_trigger/romfs/model/oj/oj740012.arc
+				${PROJECT_SOURCE_DIR}/assets/tutorial_trigger/romfs/model/oj/oj740012.wimdo
+				${PROJECT_SOURCE_DIR}/assets/tutorial_trigger/romfs/model/oj/oj740012.wismt
+				${PROJECT_SOURCE_DIR}/assets/tutorial_trigger/romfs/model/oj/oj700101.arc
+				${PROJECT_SOURCE_DIR}/assets/tutorial_trigger/romfs/model/oj/oj700101.wimdo
+				${PROJECT_SOURCE_DIR}/assets/tutorial_trigger/romfs/model/oj/oj700101.wismt
+				${PROJECT_SOURCE_DIR}/assets/tutorial_trigger/romfs/model/oj/oj741017.arc
+				${PROJECT_SOURCE_DIR}/assets/tutorial_trigger/romfs/model/oj/oj741017.wimdo
+				${PROJECT_SOURCE_DIR}/assets/tutorial_trigger/romfs/model/oj/oj741017.wismt
 				${PROJECT_BINARY_DIR}/romfs/model/oj
 			VERBATIM
 			COMMENT "Refreshing bf2 tutorial-trigger romfs files"

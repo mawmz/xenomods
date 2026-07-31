@@ -221,36 +221,6 @@ namespace xenomods {
 
 		ReplaceTitleEvent::HookAt(&tl::TitleMain::playTitleEvent);
 
-		auto modules = g_Menu->FindSection("modules");
-		if(modules != nullptr) {
-			auto section = modules->RegisterSection(STRINGIFY(EventDebugUtils), "Event Debug");
-			section->RegisterRenderCallback(&MenuSection);
-
-			auto newFeatureDebug = modules->RegisterSection("newFeatureDebug", "NEW Feature Debug");
-			newFeatureDebug->RegisterRenderCallback(&DebugStuff::TutorialMenuSection);
-
-			auto tutorialTools = modules->RegisterSection(
-				"tutorialTools",
-				"Render tutorial triggers"
-			);
-			tutorialTools->RegisterRenderCallback(&DebugStuff::TutorialToolsMenuSection);
-
-			auto cutsceneTriggerTools = modules->RegisterSection(
-				"cutsceneTriggerTools",
-				"Render cutscene triggers"
-			);
-			cutsceneTriggerTools->RegisterRenderCallback(
-				&DebugStuff::CutsceneTriggerToolsMenuSection
-			);
-
-			auto landmarkTriggerTools = modules->RegisterSection(
-				"landmarkTriggerTools",
-				"Render landmark triggers"
-			);
-			landmarkTriggerTools->RegisterRenderCallback(
-				&DebugStuff::LandmarkTriggerToolsMenuSection
-			);
-		}
 	}
 
 #if XENOMODS_OLD_ENGINE

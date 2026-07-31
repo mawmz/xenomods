@@ -16,6 +16,7 @@ namespace xenomods {
 		bool logOpen { false };
 
 		std::vector<Section*> sections {};
+		std::vector<void(*)()> topBarCallbacks {};
 		std::vector<void(*)()> callbacks {};
 		std::vector<void(*)()> backgroundCallbacks {};
 
@@ -51,6 +52,7 @@ namespace xenomods {
 
 		Section* FindSection(const std::string& key);
 		Section* RegisterSection(const std::string& key, const std::string& display);
+		void RegisterTopBarCallback(void(*func)());
 		void RegisterRenderCallback(void(*func)(), bool foregroundOnly);
 
 		friend class Section;

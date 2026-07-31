@@ -137,6 +137,12 @@ namespace xenomods {
 		void SetLoggingLevel(Severity level);
 
 		/**
+		 * Globally suppresses xenomods log messages and toasts.
+		 */
+		void SetLoggingDisabled(bool disabled);
+		[[nodiscard]] bool IsLoggingDisabled() const;
+
+		/**
 		 * Returns a Col4 representing the color of the given severity.
 		 *
 		 * \param[in] severity The type of logger severity.
@@ -188,6 +194,7 @@ namespace xenomods {
 		std::vector<LoggerMessage> lines {};
 		std::vector<LoggerMessage> toastLines {};
 		Severity loggingLevel = Severity::Info;
+		bool loggingDisabled = true;
 	};
 
 	extern Logger* g_Logger;

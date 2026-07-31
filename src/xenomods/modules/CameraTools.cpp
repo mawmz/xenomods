@@ -25,50 +25,136 @@
 
 namespace {
 
+#if XENOMODS_OLD_ENGINE
+	struct BypassPlayerCameraHitTest :
+		skylaunch::hook::Trampoline<BypassPlayerCameraHitTest> {
+		static bool Hook(
+			void* thisPointer,
+			const void* collisionConfig,
+			const mm::Vec3& start,
+			const mm::Vec3& end,
+			mm::Vec3& hitPosition
+		) {
+			if(xenomods::CameraTools::Settings.ignoreWorldGeometry)
+				return false;
+
+			return Orig(
+				thisPointer,
+				collisionConfig,
+				start,
+				end,
+				hitPosition
+			);
+		}
+	};
+
+	struct BypassPlayerCameraCollision :
+		skylaunch::hook::Trampoline<BypassPlayerCameraCollision> {
+		static void Hook(
+			void* thisPointer,
+			mm::Vec3& cameraPosition,
+			mm::Vec3& targetPosition
+		) {
+			if(xenomods::CameraTools::Settings.ignoreWorldGeometry)
+				return;
+
+			Orig(thisPointer, cameraPosition, targetPosition);
+		}
+	};
+
+	struct BypassPlayerCameraCollision2 :
+		skylaunch::hook::Trampoline<BypassPlayerCameraCollision2> {
+		static void Hook(
+			void* thisPointer,
+			mm::Vec3& cameraPosition,
+			mm::Vec3& targetPosition
+		) {
+			if(xenomods::CameraTools::Settings.ignoreWorldGeometry)
+				return;
+
+			Orig(thisPointer, cameraPosition, targetPosition);
+		}
+	};
+
+	struct BypassPlayerCameraCollisionSide :
+		skylaunch::hook::Trampoline<BypassPlayerCameraCollisionSide> {
+		static void Hook(
+			void* thisPointer,
+			mm::Vec3& cameraPosition,
+			mm::Vec3& targetPosition
+		) {
+			if(xenomods::CameraTools::Settings.ignoreWorldGeometry)
+				return;
+
+			Orig(thisPointer, cameraPosition, targetPosition);
+		}
+	};
+
+	struct BypassPlayerCameraCollisionUp :
+		skylaunch::hook::Trampoline<BypassPlayerCameraCollisionUp> {
+		static void Hook(
+			void* thisPointer,
+			const mm::Vec3& referencePosition,
+			mm::Vec3& cameraPosition,
+			mm::Vec3& targetPosition
+		) {
+			if(xenomods::CameraTools::Settings.ignoreWorldGeometry)
+				return;
+
+			Orig(
+				thisPointer,
+				referencePosition,
+				cameraPosition,
+				targetPosition
+			);
+		}
+	};
+#endif
+
 	struct PilotCameraLayers : skylaunch::hook::Trampoline<PilotCameraLayers> {
 #if XENOMODS_NEW_ENGINE
 		static void Hook(fw::CameraLayer* this_pointer, const fw::Document& document, const fw::UpdateInfo& updateInfo) {
 #else
 		static void Hook(fw::CameraLayer* this_pointer, const fw::UpdateInfo& updateInfo) {
 #endif
-			if(reinterpret_cast<void*>(this_pointer->listCamera.head) != &this_pointer->listCamera) {
-				size_t ptrOffset = 0x10; //offsetof(fw::Camera, next);
-		auto realHead = reinterpret_cast<fw::Camera*>(reinterpret_cast<u8*>(this_pointer->listCamera.head) - ptrOffset);
-		//xenomods::g_Logger->LogDebug("list @ {} - head == {}, count {}", reinterpret_cast<void*>(&this_pointer->listCamera), reinterpret_cast<void*>(this_pointer->listCamera.head), this_pointer->listCamera.count);
+			// The list can be transiently incomplete while CameraLayer is being
+			// initialized. It is only needed for freecam, so do not traverse it
+			// during normal gameplay or while using the visual-orbit camera.
+			if(
+				xenomods::CameraTools::Settings.freecamOn
+				&& this_pointer->listCamera.head != nullptr
+				&& reinterpret_cast<void*>(this_pointer->listCamera.head)
+					!= &this_pointer->listCamera
+			) {
+				constexpr size_t CameraNodeOffset = 0x10;
+				constexpr size_t MaxCameraLayers = 64;
+				auto node = this_pointer->listCamera.head;
+				const auto sentinel = reinterpret_cast<void*>(
+					&this_pointer->listCamera
+				);
+				const auto cameraCount = std::min(
+					this_pointer->listCamera.count,
+					MaxCameraLayers
+				);
 
-		if(realHead == nullptr)
-			return;
+				for(size_t index = 0; index < cameraCount; index++) {
+					if(node == nullptr || reinterpret_cast<void*>(node) == sentinel)
+						break;
 
-		while(true) {
-			//xenomods::g_Logger->LogDebug("so no head? {} -> {}", reinterpret_cast<void*>(realHead), reinterpret_cast<void*>(realHead->next));
-			//xenomods::g_Logger->LogDebug("say,  head? {} -> {}", reinterpret_cast<void*>(realHead), reinterpret_cast<void*>(realHead->prev));
-			//dbgutil::logMemory(realHead, sizeof(fw::Camera));
+					auto camera = reinterpret_cast<fw::Camera*>(
+						reinterpret_cast<u8*>(node) - CameraNodeOffset
+					);
+					node = node->next;
 
-			//if (realHead->getRTTI()->isKindOf(&fw::Camera::m_rtti)) {
-			if(xenomods::CameraTools::Settings.freecamOn) {
-				realHead->matrix = glm::inverse(static_cast<const glm::mat4&>(xenomods::CameraTools::CamState.matrix));
-				realHead->fov = xenomods::CameraTools::CamState.fov;
-
-				//fw::debug::drawCompareZ(false);
-				//fw::debug::drawCamera(glm::inverse(static_cast<const glm::mat4&>(realHead->matrix)), mm::Col4::cyan);
-				//fw::debug::drawCompareZ(true);
-
-				//std::string namey = std::string(realHead->getName());
-				//xenomods::g_Logger->ToastInfo("ball" + namey, "{} prio {} fov {:.2f}", namey, realHead->CAMERA_PRIO, realHead->fov);
-
-				//xenomods::debug::drawFontFmtShadow3D(xenomods::CameraTools::Meta.pos, mm::Col4::white, "Camera: {} prio {}", namey, realHead->CAMERA_PRIO);
+					camera->matrix = glm::inverse(
+						static_cast<const glm::mat4&>(
+							xenomods::CameraTools::CamState.matrix
+						)
+					);
+					camera->fov =
+						xenomods::CameraTools::CamState.fov;
+				}
 			}
-			//}
-
-			if(realHead->prev == realHead->next)
-				break;
-
-			if(realHead->next == nullptr || reinterpret_cast<void*>(realHead->next) == &this_pointer->listCamera)
-				break;
-
-			realHead = reinterpret_cast<fw::Camera*>(reinterpret_cast<u8*>(realHead->next) - ptrOffset);
-		}
-	}
 
 	if(xenomods::CameraTools::Settings.freecamOn) {
 		this_pointer->willLerp = true;
@@ -86,6 +172,7 @@ namespace {
 	if(
 		xenomods::CameraTools::Settings.freecamOn
 		&& this_pointer->objCam != nullptr
+		&& this_pointer->objCam->AttrTransformPtr != nullptr
 	) {
 		this_pointer->objCam->AttrTransformPtr->fov = xenomods::CameraTools::CamState.fov;
 #if !XENOMODS_CODENAME(bf3)
@@ -103,8 +190,8 @@ namespace {
 			== this_pointer->objCam->ScnPtr->getCam(-1)
 	) {
 		// CameraLayer and its fw::Camera objects remain untouched. Movement
-		// therefore keeps XC2's P1-controlled camera basis. Only the final
-		// scene camera shown by the renderer receives the P2 visual matrix.
+		// therefore keeps XC2's normal camera basis. Only the final scene
+		// camera shown by the renderer receives the visual-orbit matrix.
 		xenomods::CameraTools::CamState.matrix =
 			this_pointer->objCam->AttrTransformPtr->viewMatInverse;
 		xenomods::CameraTools::CamState.fov =
@@ -139,7 +226,7 @@ struct CopyCurrentCameraState : skylaunch::hook::Trampoline<CopyCurrentCameraSta
 				!xenomods::CameraTools::Settings.freecamOn
 				&& !xenomods::CameraTools::Settings.cameraUnlockOn
 			) {
-				// CamState and its menu values always follow XC2's normal P1
+				// CamState and its menu values always follow XC2's normal
 				// camera. Camera unlock has a separate VisualCamState.
 				xenomods::CameraTools::CamState.matrix =
 					this_pointer->AttrTransformPtr->viewMatInverse;
@@ -161,6 +248,7 @@ namespace xenomods {
 
 	CameraTools::FreecamSettings CameraTools::Settings = {
 		.freecamOn = false,
+		.ignoreWorldGeometry = false,
 		.cameraUnlockOn = false,
 		.relativeToPlayer = false,
 		.moveAxis = FreecamSettings::MoveAxis::XZ,
@@ -230,7 +318,7 @@ namespace xenomods {
 		const auto cameraPosition = CameraTools::CamMeta.pos;
 
 		// XC2 already stores the normal camera's exact target. Use it directly
-		// so enabling unlock begins at the P1 camera's current transform with
+		// so enabling unlock begins at the normal camera's current transform with
 		// no inferred target or activation jump.
 		if(CameraTools::HasNormalCamTarget) {
 			CameraTools::VisualCamTarget =
@@ -291,9 +379,9 @@ namespace xenomods {
 		settings.unlockDistance =
 			std::max(settings.unlockDistance, 0.25f);
 
-		// Follow the P1-controlled character without borrowing any subsequent
-		// P1 camera rotation. The visual target receives only Rex's world-space
-		// displacement and P2's explicit height adjustment below.
+		// Follow the controlled character without borrowing any subsequent
+		// normal-camera rotation. The visual target receives only the player's
+		// world-space displacement and the explicit height adjustment below.
 		const glm::vec3 playerDelta =
 			*playerPosition - CameraTools::UnlockLastPlayerPosition;
 		CameraTools::VisualCamTarget += playerDelta;
@@ -319,8 +407,7 @@ namespace xenomods {
 				target,
 				glm::vec3(0.f, 1.f, 0.f)
 			));
-		// FOV remains tied to the normal P1 camera just like the camera-tools
-		// values. P2 controls only the visual orbit transform.
+		// FOV remains tied to the normal camera just like the camera-tools values.
 		CameraTools::VisualCamState.fov = CameraTools::CamState.fov;
 	}
 
@@ -328,7 +415,7 @@ namespace xenomods {
 		// for future reference:
 		//auto seconds = nn::os::GetSystemTick()/19200000.;
 
-		// don't need to check if p1, we already did that
+		// The debug-input selection has already been handled.
 		HidInput* debugInput = HidInput::GetDebugInput();
 
 		auto set = &CameraTools::Settings;
@@ -554,9 +641,15 @@ namespace xenomods {
 			if(Settings.freecamOn)
 				Settings.cameraUnlockOn = false;
 		}
+#if XENOMODS_OLD_ENGINE
+		ImGui::Checkbox(
+			"Ignore world geometry",
+			&Settings.ignoreWorldGeometry
+		);
+#endif
 		if(
 			ImGui::Checkbox(
-				"Camera Unlock (visual orbit)",
+				"Camera Unlock",
 				&Settings.cameraUnlockOn
 			)
 		) {
@@ -566,10 +659,6 @@ namespace xenomods {
 			}
 		}
 		if(Settings.cameraUnlockOn) {
-			ImGui::TextWrapped(
-				"The normal camera remains active for movement. "
-				"P2 controls only the displayed camera."
-			);
 			ImGui::PushItemWidth(150.f);
 			ImGui::DragFloat(
 				"Visual yaw",
@@ -596,9 +685,6 @@ namespace xenomods {
 				0.05f
 			);
 			ImGui::PopItemWidth();
-			ImGui::TextDisabled(
-				"P2: right stick orbit, left Y zoom, left X height"
-			);
 		}
 
 		ImGui::PushItemWidth(250.f);
@@ -664,6 +750,22 @@ namespace xenomods {
 		g_Logger->LogDebug("Setting up camera tools...");
 
 #if XENOMODS_OLD_ENGINE
+		BypassPlayerCameraHitTest::HookAt(
+			"_ZN2gf12PlayerCamera14getHitPositionERKN2fw15ColiCheckConfigERKN2mm4Vec3ES8_RS6_"
+		);
+		BypassPlayerCameraCollision::HookAt(
+			"_ZN2gf12PlayerCamera15updateCollisionERN2mm4Vec3ES3_"
+		);
+		BypassPlayerCameraCollision2::HookAt(
+			"_ZN2gf12PlayerCamera16updateCollision2ERN2mm4Vec3ES3_"
+		);
+		BypassPlayerCameraCollisionSide::HookAt(
+			"_ZN2gf12PlayerCamera19updateCollisionSideERN2mm4Vec3ES3_"
+		);
+		BypassPlayerCameraCollisionUp::HookAt(
+			"_ZN2gf12PlayerCamera17updateCollisionUpERKN2mm4Vec3ERS2_S5_"
+		);
+
 		// intermittently reads the address as 0x0... let's just use the actual symbol for now
 		// TODO: why *is* the function reference not exporting?
 		PilotCameraLayers::HookAt("_ZN2fw11CameraLayer6updateERKNS_10UpdateInfoE");
@@ -691,11 +793,6 @@ namespace xenomods {
 			CopyCurrentCameraState::HookFromBase(0x71012711cc);
 #endif
 
-		auto modules = g_Menu->FindSection("modules");
-		if(modules != nullptr) {
-			auto section = modules->RegisterSection(STRINGIFY(CameraTools), "Camera Tools");
-			section->RegisterRenderCallback(&MenuSection);
-		}
 	}
 
 	void CameraTools::Update(fw::UpdateInfo* updateInfo) {

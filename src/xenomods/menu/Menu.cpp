@@ -110,6 +110,10 @@ namespace xenomods {
 		if(ImGui::Button("Reload config/BDAT overrides"))
 			XenomodsState::ReloadConfig();
 
+		bool loggingDisabled = g_Logger->IsLoggingDisabled();
+		if(ImGui::Checkbox("Disable logging", &loggingDisabled))
+			g_Logger->SetLoggingDisabled(loggingDisabled);
+
 		if (ImGui::Button("Toggle Log"))
 			g_Menu->ToggleLog();
 #if _DEBUG
@@ -154,8 +158,6 @@ namespace xenomods {
 		imgui_xeno_add_on_pre_init(&ImGuiPreInitCallback);
 		imgui_xeno_init(nullptr, &Render);
 
-		auto modules = RegisterSection("modules", "Modules");
-
 		auto state = RegisterSection("state", "State");
 		state->RegisterRenderCallback(&Section_State);
 
@@ -187,7 +189,11 @@ namespace xenomods {
 		static bool test = false;
 		static bool show_demo = false;
 		if(ImGui::BeginMainMenuBar()) {
-			for(Section* sec : g_Menu->sections) {
+			for(auto func : g_Menu->topBarCallbacks)
+				func();
+
+			for(std::size_t i = 0; i < g_Menu->sections.size(); i++) {
+				Section* sec = g_Menu->sections[i];
 				if (sec == nullptr)
 					continue;
 
@@ -283,6 +289,11 @@ namespace xenomods {
 		auto sec = new Section(key, display);
 		sections.push_back(sec);
 		return sec;
+	}
+
+	void Menu::RegisterTopBarCallback(void (*func)()) {
+		if(func != nullptr)
+			topBarCallbacks.push_back(func);
 	}
 
 	void Menu::RegisterRenderCallback(void (*func)(), bool foregroundOnly) {

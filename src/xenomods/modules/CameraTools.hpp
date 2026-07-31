@@ -18,6 +18,7 @@ namespace xenomods {
 			};
 
 			bool freecamOn;
+			bool ignoreWorldGeometry;
 			bool cameraUnlockOn;
 			bool relativeToPlayer;
 			MoveAxis moveAxis;

@@ -14,6 +14,7 @@ namespace xenomods {
 		static bool skipSkyDomeRendering;
 		static bool skipFogRendering;
 		static bool skipDepthOfFieldRendering;
+		static bool disableMapFoliage;
 		static bool enableAutoReduction;
 		static bool disableModelFade;
 
@@ -33,7 +34,6 @@ namespace xenomods {
 
 		static void MenuSection();
 		static void MenuToggles();
-		static void MenuGBuffer();
 
 		void Initialize() override;
 		void Update(fw::UpdateInfo* updateInfo) override;

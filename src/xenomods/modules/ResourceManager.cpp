@@ -150,11 +150,6 @@ namespace xenomods {
 		UpdatableModule::Initialize();
 		g_Logger->LogDebug("Setting up resource manager...");
 
-		auto modules = g_Menu->FindSection("modules");
-		if(modules != nullptr) {
-			auto section = modules->RegisterSection(STRINGIFY(ResourceManager), "Resource Manager");
-			section->RegisterRenderCallback(&MenuSection);
-		}
 	}
 
 	XENOMODS_REGISTER_MODULE(ResourceManager)

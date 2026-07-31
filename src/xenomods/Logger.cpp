@@ -24,7 +24,22 @@ namespace xenomods {
 		loggingLevel = level;
 	}
 
+	void Logger::SetLoggingDisabled(bool disabled) {
+		loggingDisabled = disabled;
+		if(disabled) {
+			lines.clear();
+			toastLines.clear();
+		}
+	}
+
+	bool Logger::IsLoggingDisabled() const {
+		return loggingDisabled;
+	}
+
 	void Logger::VLogMessage(Severity severity, fmt::string_view format, fmt::format_args args) {
+		if(loggingDisabled)
+			return;
+
 		auto formatted = fmt::vformat(format, args);
 
 		// by god I wish I didn't have to deal with this
@@ -42,6 +57,9 @@ namespace xenomods {
 	}
 
 	void Logger::VToastMessage(std::string_view group, Severity severity, fmt::string_view format, fmt::format_args args) {
+		if(loggingDisabled)
+			return;
+
 		auto formatted = fmt::vformat(format, args);
 
 		// by god I wish I didn't have to deal with this

@@ -56,7 +56,6 @@ namespace xenomods {
 		static bool ShowAllWarps;
 		static bool ShowWarpsOnMap;
 		static bool ShowPlayerTelemetry;
-		static bool PersistPlayerTelemetry;
 		static void MenuWarps();
 		static void PlayerTelemetryOverlay();
 

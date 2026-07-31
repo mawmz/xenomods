@@ -43,6 +43,8 @@ namespace btl {
 
 	class BattleCharacter {
 	   public:
+		enum class ACTION_ID : int {};
+
 		struct NOTIFY_DAMAGE_DATA {
 			BattleCharacter* attacker;
 			ARTS_SLOT_DATA* artsSlotData;
@@ -78,6 +80,24 @@ namespace btl {
 		};
 
 		DriverType GetDriverType() const;
+
+		bool AI_Arts(ACTION_ID actionId, int artsSlot);
+		bool StartArts(int artsSlot, bool unk1, bool unk2);
+		std::uint32_t IsEnableArts(
+			int unk,
+			int artsSlot,
+			int unk2,
+			gf::GF_OBJ_HANDLE* target
+		) const;
+		const ARTS_SLOT_DATA* GetArtsSlotData(
+			int artsSlot,
+			bool unk,
+			int palette
+		) const;
 	};
+
+	namespace Utility {
+		int AI_GetCharacterID(gf::GF_OBJ_HANDLE* handle);
+	}
 
 }
