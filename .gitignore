@@ -20,3 +20,5 @@ tools/
 *.npdm
 *.nam
 *.nro
+
+Changelog.md
