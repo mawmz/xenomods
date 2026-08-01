@@ -17,6 +17,7 @@
 #include "modules/DebugStuff.hpp"
 #include "modules/PlayerMovement.hpp"
 #include "modules/RenderingControls.hpp"
+#include "modules/Targeting.hpp"
 #include "modules/ToolWindowLayout.hpp"
 
 namespace xenomods::UtilityMenu {
@@ -30,6 +31,7 @@ namespace xenomods::UtilityMenu {
 		struct SavedState {
 			bool utility = false;
 			bool warps = false;
+			bool targeting = false;
 			bool telemetry = false;
 			bool triggers = false;
 			bool frameCounter = false;
@@ -51,6 +53,7 @@ namespace xenomods::UtilityMenu {
 			return {
 				ShowWindow,
 				PlayerMovement::ShowWarpsWindow,
+				Targeting::ShowWindow,
 				PlayerMovement::ShowPlayerTelemetry,
 				DebugStuff::showTriggerVisualizer,
 				CombatAiDebug::ShowFrameCounter,
@@ -64,10 +67,11 @@ namespace xenomods::UtilityMenu {
 				return;
 
 			const auto contents = fmt::format(
-				"utility = {}\nwarps = {}\ntelemetry = {}\ntriggers = {}\n"
+				"utility = {}\nwarps = {}\ntargeting = {}\ntelemetry = {}\ntriggers = {}\n"
 				"frame_counter = {}\nutility_tab = {}\n",
 				state.utility,
 				state.warps,
+				state.targeting,
 				state.telemetry,
 				state.triggers,
 				state.frameCounter,
@@ -106,6 +110,8 @@ namespace xenomods::UtilityMenu {
 
 		if(ImGui::MenuItem("Warps", nullptr, PlayerMovement::ShowWarpsWindow))
 			PlayerMovement::ShowWarpsWindow = !PlayerMovement::ShowWarpsWindow;
+		if(ImGui::MenuItem("Targeting", nullptr, Targeting::ShowWindow))
+			Targeting::ShowWindow = !Targeting::ShowWindow;
 		if(ImGui::MenuItem("Utility", nullptr, ShowWindow)) {
 			ShowWindow = !ShowWindow;
 			if(ShowWindow)
@@ -160,6 +166,21 @@ namespace xenomods::UtilityMenu {
 			}
 			if(Tab("Movement", 3)) {
 				PlayerMovement::MenuSection();
+				ImGui::SeparatorText("World interactions");
+				ImGui::Checkbox(
+					"Infinite collection points",
+					&DebugStuff::infiniteCollectionPoints
+				);
+				ImGui::Checkbox(
+					"Minimum collection-item distance",
+					&DebugStuff::minimumCollectionItemDistance
+				);
+				if(ImGui::IsItemHovered()) {
+					ImGui::SetTooltip(
+						"Forces spawned field items to their drop parameter's "
+						"minimum outward distance."
+					);
+				}
 				ImGui::EndTabItem();
 			}
 			ImGui::EndTabBar();
@@ -179,6 +200,7 @@ namespace xenomods::UtilityMenu {
 			const auto& table = settings.table();
 			ShowWindow = table["utility"].value_or(false);
 			PlayerMovement::ShowWarpsWindow = table["warps"].value_or(false);
+			Targeting::ShowWindow = table["targeting"].value_or(false);
 			PlayerMovement::ShowPlayerTelemetry = table["telemetry"].value_or(false);
 			DebugStuff::showTriggerVisualizer = table["triggers"].value_or(false);
 			CombatAiDebug::ShowFrameCounter = table["frame_counter"].value_or(false);

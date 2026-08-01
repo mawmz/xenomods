@@ -135,6 +135,11 @@ namespace {
 	constexpr std::size_t CollectionPositionPointerOffset = 0x10;
 	constexpr std::size_t CollectionObjectHandleOffset = 0x48;
 	constexpr std::size_t CollectionIdOffset = 0x38;
+	constexpr std::size_t DropitemVelocityOffset = 0x20;
+	constexpr std::size_t DropitemParamOffset = 0x40;
+	constexpr std::size_t DropitemDistanceOffset = 0x4C;
+	constexpr std::size_t DropitemParamDistanceOffset = 0x08;
+	constexpr std::size_t DropitemParamTimeOffset = 0x10;
 	constexpr std::size_t LandmarkIdOffset = 0x38;
 	constexpr int LandmarkFlagIdBase = 51161;
 	constexpr std::size_t GmkEventBdatInfoOffset = 0x30;
@@ -2314,6 +2319,61 @@ namespace {
 		}
 	};
 
+	struct CollectionAccessedHook
+		: skylaunch::hook::Trampoline<CollectionAccessedHook> {
+		static void Hook(
+			void* collection,
+			gf::GF_OBJ_HANDLE* player
+		) {
+			if(xenomods::DebugStuff::infiniteCollectionPoints)
+				return;
+
+			Orig(collection, player);
+		}
+	};
+
+	struct DropitemInitializeHook
+		: skylaunch::hook::Trampoline<DropitemInitializeHook> {
+		static void Hook(void* dropitem) {
+			Orig(dropitem);
+			if(!xenomods::DebugStuff::minimumCollectionItemDistance)
+				return;
+
+			auto bytes = static_cast<std::uint8_t*>(dropitem);
+			const auto param = *reinterpret_cast<const std::uint8_t* const*>(
+				bytes + DropitemParamOffset
+			);
+			if(param == nullptr)
+				return;
+
+			const float minimumDistance = *reinterpret_cast<const float*>(
+				param + DropitemParamDistanceOffset
+			);
+			const float travelTime = *reinterpret_cast<const float*>(
+				param + DropitemParamTimeOffset
+			);
+			auto velocity = reinterpret_cast<glm::vec3*>(
+				bytes + DropitemVelocityOffset
+			);
+			const float horizontalSpeed = std::sqrt(
+				velocity->x * velocity->x + velocity->z * velocity->z
+			);
+			if(
+				!std::isfinite(minimumDistance)
+				|| !std::isfinite(travelTime)
+				|| travelTime <= 0.0f
+				|| horizontalSpeed <= 0.0001f
+			)
+				return;
+
+			const float minimumHorizontalSpeed = minimumDistance / travelTime * 0.5f;
+			const float scale = minimumHorizontalSpeed / horizontalSpeed;
+			velocity->x *= scale;
+			velocity->z *= scale;
+			*reinterpret_cast<float*>(bytes + DropitemDistanceOffset) = minimumDistance;
+		}
+	};
+
 	struct AccessPluginSetupHook
 		: skylaunch::hook::Trampoline<AccessPluginSetupHook> {
 		static std::uint64_t Hook(
@@ -2503,6 +2563,8 @@ namespace xenomods {
 	bool DebugStuff::renderCutsceneTrigger = false;
 	bool DebugStuff::renderLandmarkTrigger = false;
 	bool DebugStuff::renderCollectionPointRange = false;
+	bool DebugStuff::infiniteCollectionPoints = false;
+	bool DebugStuff::minimumCollectionItemDistance = false;
 	bool DebugStuff::traceLocalGameFlags = false;
 	bool DebugStuff::traceTutorialCallSites = false;
 	bool DebugStuff::showTriggerVisualizer = false;
@@ -3410,12 +3472,14 @@ namespace xenomods {
 		CutsceneEventUpdateHook::HookAt("_ZN3gmk8GmkEvent6updateEf");
 		LandmarkUpdateHook::HookAt("_ZN3gmk11GmkLandmark6updateEf");
 		CollectionUpdateHook::HookAt("_ZN3gmk13GmkCollection6updateEf");
-		AccessPluginSetupHook::HookAt(
-			"_ZN2gf2pc12AccessPlugin5setupERNS_15GfComBehaviorPcE"
+		CollectionAccessedHook::HookAt(
+			"_ZN3gmk13GmkCollection16onPlayerAccessedEPN2gf13GF_OBJ_HANDLEE"
 		);
-		AccessPluginUpdateHook::HookAt(
-			"_ZN2gf2pc12AccessPlugin6updateERNS_15GfComBehaviorPcERKN2fw10UpdateInfoE"
+		DropitemInitializeHook::HookAt(
+			"_ZN2gf14GfFobjDropitem10initializeEv"
 		);
+		// Do not inspect AccessPlugin's partially initialized resource pointer.
+		// AccessRangeHook receives the live AccessParam directly and safely.
 		AccessRangeHook::HookAt(
 			"_ZN2gf2pc13isActiveRangeERNS_15GfComPropertyPcERKNS_11AccessParamEPNS_13GF_OBJ_HANDLEE"
 		);

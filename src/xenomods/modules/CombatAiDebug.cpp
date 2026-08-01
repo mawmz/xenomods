@@ -80,6 +80,11 @@ namespace {
 	std::size_t HistoryWrite = 0;
 	std::size_t HistoryCount = 0;
 	std::uint64_t FrameCounter = 0;
+	constexpr std::size_t LoadHistoryCapacity = 32;
+	std::array<std::uint64_t, LoadHistoryCapacity> LoadFrameHistory {};
+	std::size_t LoadHistoryWrite = 0;
+	std::size_t LoadHistoryCount = 0;
+	bool TrackLoadFrames = false;
 	std::uint64_t DecisionSequence = 0;
 	std::array<std::uint64_t, SlotCount> SelectedCounts {};
 	std::uint64_t GenericDecisionCount = 0;
@@ -632,12 +637,36 @@ namespace xenomods {
 			ImGuiCond_Always,
 			ImVec2(1.f, 0.f)
 		);
-		ImGui::SetNextWindowSizeConstraints(ImVec2(230.f, 0.f), ImVec2(230.f, 140.f));
+		ImGui::SetNextWindowSizeConstraints(ImVec2(230.f, 0.f), ImVec2(230.f, 210.f));
 		if(ImGui::Begin("Frame Counter", &ShowFrameCounter, ImGuiWindowFlags_AlwaysAutoResize)) {
 			ImGui::Text("Since most recent load: %llu", FrameCounter);
 			ImGui::Text("Nominal 30 FPS time: %.3f s", static_cast<double>(FrameCounter) / 30.0);
 			if(ImGui::Button("Reset counter"))
 				FrameCounter = 0;
+			ImGui::SameLine();
+			if(ImGui::Button("Track"))
+				TrackLoadFrames = !TrackLoadFrames;
+			ImGui::SameLine();
+			if(TrackLoadFrames)
+				ImGui::TextColored(ImVec4(0.3f, 1.f, 0.4f, 1.f), "ON");
+			else
+				ImGui::TextDisabled("OFF");
+
+			ImGui::SeparatorText("History");
+			const float historyHeight = ImGui::GetTextLineHeightWithSpacing() * 4.f;
+			if(ImGui::BeginChild("LoadFrameHistory", ImVec2(0.f, historyHeight), true)) {
+				if(LoadHistoryCount == 0) {
+					ImGui::TextDisabled("No tracked loads");
+				} else {
+					for(std::size_t newest = 0; newest < LoadHistoryCount; newest++) {
+						const std::size_t index =
+							(LoadHistoryWrite + LoadHistoryCapacity - 1 - newest)
+							% LoadHistoryCapacity;
+						ImGui::Text("%zu: %lluf", newest + 1, LoadFrameHistory[index]);
+					}
+				}
+			}
+			ImGui::EndChild();
 		}
 		ImGui::End();
 #endif
@@ -660,6 +689,14 @@ namespace xenomods {
 
 	void CombatAiDebug::OnMapChange(unsigned short mapId) {
 #if XENOMODS_CODENAME(bf2)
+		if(TrackLoadFrames && FrameCounter > 0) {
+			LoadFrameHistory[LoadHistoryWrite] = FrameCounter;
+			LoadHistoryWrite = (LoadHistoryWrite + 1) % LoadHistoryCapacity;
+			LoadHistoryCount = std::min(
+				LoadHistoryCount + 1,
+				LoadHistoryCapacity
+			);
+		}
 		FrameCounter = 0;
 		ClearHistory();
 #endif

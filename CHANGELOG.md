@@ -6,6 +6,8 @@
 - Added tutorial, cutscene, landmark, radial, and collection-point trigger visualization.
 - Added player telemetry, collision information, frame counting, and combat-AI inspection tools.
 - Added input buffering, camera unlock controls, and camera-aware Warps.
+- Added map-specific Targeting routes that steer the controlled character through an ordered list of visualized targets.
+- Added optional selection-based route starts and reusable collection points.
 - Added direct save reloading and tutorial-repeat controls.
 - Improved trigger rendering, visibility, materials, and performance.
 

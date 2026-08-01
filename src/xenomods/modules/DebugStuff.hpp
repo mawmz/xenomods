@@ -17,6 +17,8 @@ namespace xenomods {
 		static bool renderCutsceneTrigger;
 		static bool renderLandmarkTrigger;
 		static bool renderCollectionPointRange;
+		static bool infiniteCollectionPoints;
+		static bool minimumCollectionItemDistance;
 		static bool traceLocalGameFlags;
 		static bool traceTutorialCallSites;
 		static bool showTriggerVisualizer;

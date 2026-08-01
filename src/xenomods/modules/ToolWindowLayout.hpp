@@ -18,6 +18,7 @@ namespace xenomods::toolwindow {
 		TriggerVisualizer,
 		FrameCounter,
 		Warps,
+		Targeting,
 		Utility,
 		Count
 	};
@@ -25,15 +26,19 @@ namespace xenomods::toolwindow {
 	inline std::array<bool, static_cast<std::size_t>(StackSlot::Count)>
 		StackVisibility {};
 	inline std::array<float, static_cast<std::size_t>(StackSlot::Count)>
-		StackHeights {116.f, 190.f, 92.f, 260.f, 170.f};
+		StackHeights {116.f, 190.f, 92.f, 260.f, 300.f, 170.f};
 
-	inline void SetCompactWidth() {
-		const float width =
+	inline float CompactWidth() {
+		return
 			ImGui::CalcTextSize(
 				"Pos    X -00000.00  Y -00000.00  Z -00000.00"
 			).x
 				+ ImGui::GetStyle().WindowPadding.x * 2.f
 				+ 4.f;
+	}
+
+	inline void SetCompactWidth() {
+		const float width = CompactWidth();
 		ImGui::SetNextWindowSizeConstraints(
 			ImVec2(width, 0.f),
 			ImVec2(width, FLT_MAX)

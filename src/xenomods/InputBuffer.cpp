@@ -19,7 +19,6 @@
 namespace xenomods::InputBuffer {
 
 	bool Enabled = false;
-	int ButtonBufferFrames = 6;
 	bool BufferLeftStick = false;
 	bool BufferRightStick = false;
 	int StickBufferFrames = 3;
@@ -27,7 +26,6 @@ namespace xenomods::InputBuffer {
 	namespace {
 		struct SavedSettings {
 			bool enabled = false;
-			int buttonBufferFrames = 6;
 
 			bool operator==(const SavedSettings&) const = default;
 		};
@@ -42,7 +40,7 @@ namespace xenomods::InputBuffer {
 		}
 
 		SavedSettings CurrentSettings() {
-			return {Enabled, ButtonBufferFrames};
+			return {Enabled};
 		}
 
 		void SaveSettingsIfChanged() {
@@ -58,10 +56,6 @@ namespace xenomods::InputBuffer {
 
 			toml::table inputBuffer;
 			inputBuffer.insert_or_assign("enabled", settings.enabled);
-			inputBuffer.insert_or_assign(
-				"button_buffer_frames",
-				settings.buttonBufferFrames
-			);
 			root.insert_or_assign("input_buffer", std::move(inputBuffer));
 
 			std::stringstream stream;
@@ -89,6 +83,9 @@ namespace xenomods::InputBuffer {
 
 		StickState leftStick {};
 		StickState rightStick {};
+		bool leftStickOverrideActive = false;
+		float leftStickOverrideX = 0.f;
+		float leftStickOverrideY = 0.f;
 		constexpr float StickThreshold = 0.05f;
 
 		std::uint32_t GetPendingMask() {
@@ -171,11 +168,7 @@ namespace xenomods::InputBuffer {
 					if((physicalHeld & bit) == 0) {
 						buttonFrames[index] = 0;
 					} else if((original & bit) != 0) {
-						buttonFrames[index] = static_cast<std::uint8_t>(
-							std::clamp(ButtonBufferFrames, 1, 60)
-						);
-					} else if(buttonFrames[index] != 0) {
-						buttonFrames[index]--;
+						buttonFrames[index] = 1;
 					}
 				}
 
@@ -187,6 +180,8 @@ namespace xenomods::InputBuffer {
 		struct GetALXHook : skylaunch::hook::Trampoline<GetALXHook> {
 			static float Hook(int pad, bool deadzone) {
 				const float original = Orig(pad, deadzone);
+				if(pad == 0 && leftStickOverrideActive)
+					return leftStickOverrideX;
 				return pad == 0 ? BufferStickX(leftStick, original, BufferLeftStick) : original;
 			}
 		};
@@ -194,6 +189,8 @@ namespace xenomods::InputBuffer {
 		struct GetALYHook : skylaunch::hook::Trampoline<GetALYHook> {
 			static float Hook(int pad, bool deadzone) {
 				const float original = Orig(pad, deadzone);
+				if(pad == 0 && leftStickOverrideActive)
+					return leftStickOverrideY;
 				return pad == 0 ? BufferStickY(leftStick, original, BufferLeftStick) : original;
 			}
 		};
@@ -248,11 +245,16 @@ namespace xenomods::InputBuffer {
 		return GetPendingMask();
 	}
 
+	void SetLeftStickOverride(bool active, float x, float y) {
+		leftStickOverrideActive = active;
+		leftStickOverrideX = active ? std::clamp(x, -1.f, 1.f) : 0.f;
+		leftStickOverrideY = active ? std::clamp(y, -1.f, 1.f) : 0.f;
+	}
+
 	void DrawMenu() {
 		if(ImGui::Checkbox("Enable input buffering", &Enabled) && !Enabled)
 			Clear();
 		ImGui::PushItemWidth(120.f);
-		ImGui::SliderInt("Button buffer frames", &ButtonBufferFrames, 1, 30);
 		ImGui::Checkbox("Buffer left-stick flicks", &BufferLeftStick);
 		ImGui::Checkbox("Buffer right-stick flicks", &BufferRightStick);
 		if(BufferLeftStick || BufferRightStick)
@@ -268,11 +270,6 @@ namespace xenomods::InputBuffer {
 		if(settings) {
 			const auto inputBuffer = settings["input_buffer"];
 			Enabled = inputBuffer["enabled"].value_or(false);
-			ButtonBufferFrames = std::clamp(
-				inputBuffer["button_buffer_frames"].value_or(6),
-				1,
-				30
-			);
 		}
 		lastSavedSettings = CurrentSettings();
 

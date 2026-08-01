@@ -73,6 +73,7 @@ namespace xenomods {
 			return true;
 		}
 		void Update(fw::UpdateInfo* updateInfo) override;
+		void OnMapChange(unsigned short mapId) override;
 	};
 
 } // namespace xenomods

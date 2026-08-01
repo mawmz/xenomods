@@ -863,6 +863,13 @@ namespace xenomods {
 		}
 	}
 
+	void CameraTools::OnMapChange(unsigned short) {
+		// Camera state points into the outgoing scene. Do not let consumers use
+		// it until CopyCurrentCameraState observes the new scene camera.
+		HasCameraState = false;
+		HasNormalCamTarget = false;
+	}
+
 	XENOMODS_REGISTER_MODULE(CameraTools);
 
 } // namespace xenomods

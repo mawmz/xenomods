@@ -8,6 +8,8 @@ cmake-build-*/
 
 # generic build directory
 build/
+build-*/
+build-release-bf2/
 
 # dev tools
 tools/

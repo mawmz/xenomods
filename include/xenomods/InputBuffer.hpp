@@ -5,7 +5,6 @@
 namespace xenomods::InputBuffer {
 
 	extern bool Enabled;
-	extern int ButtonBufferFrames;
 	extern bool BufferLeftStick;
 	extern bool BufferRightStick;
 	extern int StickBufferFrames;
@@ -14,5 +13,6 @@ namespace xenomods::InputBuffer {
 	void DrawMenu();
 	void Clear();
 	std::uint32_t PendingButtons();
+	void SetLeftStickOverride(bool active, float x = 0.f, float y = 0.f);
 
 } // namespace xenomods::InputBuffer
