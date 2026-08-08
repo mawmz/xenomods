@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstring>
 #include <cstdint>
 #include <sstream>
 #include <string>
@@ -15,6 +16,16 @@
 #include <xenomods/Logger.hpp>
 #include <xenomods/NnFile.hpp>
 #include <xenomods/State.hpp>
+
+namespace fw {
+	struct PadData {
+		std::uint32_t words[18];
+	};
+
+	struct PadManager {
+		static PadData* getControlPadData(int pad);
+	};
+} // namespace fw
 
 namespace xenomods::InputBuffer {
 
@@ -70,8 +81,144 @@ namespace xenomods::InputBuffer {
 		}
 
 		std::array<std::uint8_t, 32> buttonFrames {};
-		std::uint32_t physicalDown = 0;
 		std::uint32_t physicalHeld = 0;
+		AcceptedActionCallback acceptedActionCallback = nullptr;
+		bool acceptedActionCaptureActive = false;
+		bool acceptedActionCaptureWaitingForNeutral = false;
+		bool playbackOverrideActive = false;
+		PlaybackMode playbackMode = PlaybackMode::StandardMenu;
+		AcceptedAction playbackAction {};
+		bool playbackUiActionOffered = false;
+		bool playbackUiDirectActionOffered = false;
+		constexpr std::uint32_t EncodedActionFlag = 0x80000000u;
+		constexpr std::uint32_t UiPadActionFlag = 0x40000000u;
+		constexpr std::uint32_t EncodedActionIndexMask = 0x0fffffffu;
+		constexpr std::uint32_t UiPadMask = 0x3fffffffu;
+		constexpr std::uint32_t DirectionButtonMask =
+			(1u << 12) | (1u << 13) | (1u << 14) | (1u << 15);
+		constexpr std::uint32_t ShoulderTriggerMask =
+			(1u << 8) | (1u << 9);
+
+		struct LayerRegistration {
+			const void* layer = nullptr;
+			std::uint32_t handle = 0;
+		};
+
+		std::array<LayerRegistration, 256> layerRegistrations {};
+
+		void RegisterInputLayer(const void* layer, std::uint32_t handle) {
+			if(layer == nullptr || handle == 0)
+				return;
+			LayerRegistration* freeRegistration = nullptr;
+			for(auto& registration : layerRegistrations) {
+				if(registration.layer == layer || registration.handle == handle) {
+					registration = {layer, handle};
+					return;
+				}
+				if(freeRegistration == nullptr && registration.layer == nullptr)
+					freeRegistration = &registration;
+			}
+			if(freeRegistration != nullptr)
+				*freeRegistration = {layer, handle};
+		}
+
+		void ReleaseInputLayer(std::uint32_t handle) {
+			for(auto& registration : layerRegistrations) {
+				if(registration.handle == handle)
+					registration = {};
+			}
+		}
+
+		std::uint32_t InputLayerHandle(const void* layer) {
+			for(const auto registration : layerRegistrations) {
+				if(registration.layer == layer)
+					return registration.handle;
+			}
+			return 0;
+		}
+
+		bool IsEncodedAction(std::uint32_t action) {
+			return (action & EncodedActionFlag) != 0;
+		}
+
+		bool IsUiPadAction(std::uint32_t action) {
+			return (action & 0xc0000000u) == UiPadActionFlag;
+		}
+
+		std::uint32_t EncodeAction(std::uint32_t inputType, std::uint32_t index) {
+			return EncodedActionFlag
+				| ((inputType & 7u) << 28)
+				| (index & EncodedActionIndexMask);
+		}
+
+		bool ActionMatches(
+			std::uint32_t encoded,
+			std::uint32_t inputType,
+			std::uint32_t index
+		) {
+			return ((encoded >> 28) & 7u) == inputType
+				&& (encoded & EncodedActionIndexMask) == index;
+		}
+
+		std::uint32_t PlaybackButtonMask() {
+			if(IsEncodedAction(playbackAction.input))
+				return 0;
+			if(IsUiPadAction(playbackAction.input))
+				return 0;
+			return playbackAction.input;
+		}
+
+		constexpr std::array<std::uint32_t, 27> UiPadToFwPad {
+			0x00000000, 0x00000004, 0x00000002, 0x00000004, 0x00000002,
+			0x00000008, 0x00000001, 0x00001000, 0x00004000, 0x00002000,
+			0x00008000, 0x00000010, 0x00000040, 0x00000400, 0x00000020,
+			0x00000080, 0x00000800, 0x00000200, 0x00000100, 0x01000000,
+			0x04000000, 0x02000000, 0x08000000, 0x10000000, 0x40000000,
+			0x20000000, 0x80000000
+		};
+
+		std::uint64_t InputLayerEntryCount(const void* inputLayer) {
+			if(inputLayer == nullptr)
+				return 0;
+			const auto bytes = reinterpret_cast<const std::uint8_t*>(inputLayer);
+			const std::uint64_t count = *reinterpret_cast<const std::uint64_t*>(
+				bytes + 0x200
+			);
+			return count <= 27 ? count : 0;
+		}
+
+		bool InputLayerAcceptsUiPadAction(const void* inputLayer) {
+			if(!IsUiPadAction(playbackAction.input))
+				return false;
+			const auto bytes = reinterpret_cast<const std::uint8_t*>(inputLayer);
+			const std::uint64_t count = InputLayerEntryCount(inputLayer);
+			if(bytes == nullptr || count == 0)
+				return false;
+
+			const std::uint32_t inputMask = playbackAction.input & UiPadMask;
+			for(std::uint64_t index = 0; index < count; index++) {
+				const auto entry = bytes + 0x50 + index * 0x10;
+				const std::uint16_t uiPad = *reinterpret_cast<const std::uint16_t*>(entry);
+				if(
+					uiPad < UiPadToFwPad.size()
+					&& entry[0xf] != 0
+					&& (inputMask & UiPadToFwPad[uiPad]) != 0
+				)
+					return true;
+			}
+			return false;
+		}
+
+		bool PlaybackLayerMatches(const void* inputLayer) {
+			if(inputLayer == nullptr)
+				return false;
+			const std::uint32_t actualLayer = InputLayerHandle(inputLayer);
+			return actualLayer != 0 && actualLayer == playbackAction.layer;
+		}
+
+		void* updatingInputLayer = nullptr;
+		fw::PadData activeUiPadData {};
+		bool activeUiPadDataValid = false;
 
 		struct StickState {
 			float x = 0.f;
@@ -149,6 +296,8 @@ namespace xenomods::InputBuffer {
 				const std::uint32_t original = Orig(pad);
 				if(pad == 0)
 					physicalHeld = original;
+				if(pad == 0 && playbackOverrideActive)
+					return PlaybackButtonMask();
 				return original;
 			}
 		};
@@ -156,13 +305,14 @@ namespace xenomods::InputBuffer {
 		struct GetDownHook : skylaunch::hook::Trampoline<GetDownHook> {
 			static std::uint32_t Hook(int pad) {
 				const std::uint32_t original = Orig(pad);
+				if(pad == 0 && playbackOverrideActive)
+					return PlaybackButtonMask();
 				if(!Enabled || pad != 0) {
 					if(pad == 0)
 						Clear();
 					return original;
 				}
 
-				physicalDown = original;
 				for(std::size_t index = 0; index < buttonFrames.size(); index++) {
 					const std::uint32_t bit = std::uint32_t {1} << index;
 					if((physicalHeld & bit) == 0) {
@@ -177,9 +327,18 @@ namespace xenomods::InputBuffer {
 			}
 		};
 
+		struct GetUpHook : skylaunch::hook::Trampoline<GetUpHook> {
+			static std::uint32_t Hook(int pad) {
+				const std::uint32_t original = Orig(pad);
+				return pad == 0 && playbackOverrideActive ? 0 : original;
+			}
+		};
+
 		struct GetALXHook : skylaunch::hook::Trampoline<GetALXHook> {
 			static float Hook(int pad, bool deadzone) {
 				const float original = Orig(pad, deadzone);
+				if(pad == 0 && playbackOverrideActive)
+					return 0.f;
 				if(pad == 0 && leftStickOverrideActive)
 					return leftStickOverrideX;
 				return pad == 0 ? BufferStickX(leftStick, original, BufferLeftStick) : original;
@@ -189,6 +348,8 @@ namespace xenomods::InputBuffer {
 		struct GetALYHook : skylaunch::hook::Trampoline<GetALYHook> {
 			static float Hook(int pad, bool deadzone) {
 				const float original = Orig(pad, deadzone);
+				if(pad == 0 && playbackOverrideActive)
+					return 0.f;
 				if(pad == 0 && leftStickOverrideActive)
 					return leftStickOverrideY;
 				return pad == 0 ? BufferStickY(leftStick, original, BufferLeftStick) : original;
@@ -198,6 +359,8 @@ namespace xenomods::InputBuffer {
 		struct GetARXHook : skylaunch::hook::Trampoline<GetARXHook> {
 			static float Hook(int pad, bool deadzone) {
 				const float original = Orig(pad, deadzone);
+				if(pad == 0 && playbackOverrideActive)
+					return 0.f;
 				return pad == 0 ? BufferStickX(rightStick, original, BufferRightStick) : original;
 			}
 		};
@@ -205,38 +368,228 @@ namespace xenomods::InputBuffer {
 		struct GetARYHook : skylaunch::hook::Trampoline<GetARYHook> {
 			static float Hook(int pad, bool deadzone) {
 				const float original = Orig(pad, deadzone);
+				if(pad == 0 && playbackOverrideActive)
+					return 0.f;
 				return pad == 0 ? BufferStickY(rightStick, original, BufferRightStick) : original;
+			}
+		};
+
+		struct UIUtilGetPadDataHook : skylaunch::hook::Trampoline<UIUtilGetPadDataHook> {
+			static fw::PadData* Hook() {
+				fw::PadData* original = Orig();
+				if(
+					acceptedActionCaptureActive
+					&& acceptedActionCaptureWaitingForNeutral
+					&& original != nullptr
+				) {
+					const std::uint32_t activeMask =
+						(original->words[0] | original->words[1] | original->words[3])
+						& UiPadMask;
+					if(activeMask == 0)
+						acceptedActionCaptureWaitingForNeutral = false;
+				}
+				if(
+					acceptedActionCaptureActive
+					&& !acceptedActionCaptureWaitingForNeutral
+					&& updatingInputLayer != nullptr
+					&& original != nullptr
+				) {
+					std::memcpy(&activeUiPadData, original, sizeof(activeUiPadData));
+					activeUiPadDataValid = true;
+				}
+				if(!playbackOverrideActive)
+					return original;
+				static fw::PadData injected {};
+				if(original != nullptr)
+					std::memcpy(&injected, original, sizeof(injected));
+				else
+					injected = {};
+
+				injected.words[0] = 0;
+				injected.words[1] = 0;
+				injected.words[3] = 0;
+				const std::uint32_t inputMask = playbackAction.input & UiPadMask;
+				const bool navigationAction = (inputMask & DirectionButtonMask) != 0;
+				const bool directAction = InputLayerAcceptsUiPadAction(updatingInputLayer);
+				const bool actionAvailable = navigationAction || directAction;
+				if(
+					IsUiPadAction(playbackAction.input)
+					&& PlaybackLayerMatches(updatingInputLayer)
+					&& actionAvailable
+				) {
+					injected.words[0] = inputMask;
+					injected.words[1] = inputMask;
+					injected.words[3] = inputMask;
+					playbackUiActionOffered = true;
+					playbackUiDirectActionOffered = directAction;
+				}
+				return &injected;
+			}
+		};
+
+		struct UIInputLayerUpdateHook : skylaunch::hook::Trampoline<UIInputLayerUpdateHook> {
+			static bool Hook(void* inputLayer) {
+				void* previousInputLayer = updatingInputLayer;
+				updatingInputLayer = inputLayer;
+				activeUiPadDataValid = false;
+				playbackUiActionOffered = false;
+				playbackUiDirectActionOffered = false;
+				const bool accepted = Orig(inputLayer);
+				const bool offeredPlaybackAction = playbackUiActionOffered;
+				const bool offeredDirectAction = playbackUiDirectActionOffered;
+				const std::uint16_t emittedEvent = *reinterpret_cast<const std::uint16_t*>(
+					reinterpret_cast<const std::uint8_t*>(inputLayer) + 0x10
+				);
+				updatingInputLayer = previousInputLayer;
+
+				if(
+					accepted
+					&& acceptedActionCaptureActive
+					&& acceptedActionCallback != nullptr
+					&& activeUiPadDataValid
+				) {
+					const std::uint32_t inputMask =
+						(activeUiPadData.words[1] | activeUiPadData.words[3]) & UiPadMask;
+					const std::uint32_t layerHandle = InputLayerHandle(inputLayer);
+					if(inputMask != 0 && layerHandle != 0) {
+						acceptedActionCallback(
+							{
+								UiPadActionFlag | inputMask,
+								layerHandle,
+								inputMask
+							},
+							ActionSource::Physical
+						);
+					}
+				}
+				if(
+					accepted
+					&& playbackOverrideActive
+					&& IsUiPadAction(playbackAction.input)
+					&& PlaybackLayerMatches(inputLayer)
+					&& offeredPlaybackAction
+					&& (offeredDirectAction || emittedEvent == 6)
+				) {
+					AcceptedAction acceptedAction = playbackAction;
+					playbackAction = {};
+					if(acceptedActionCallback != nullptr)
+						acceptedActionCallback(acceptedAction, ActionSource::Playback);
+				}
+				return accepted;
 			}
 		};
 
 		struct PadRelayCheckActionHook
 			: skylaunch::hook::Trampoline<PadRelayCheckActionHook> {
 			static bool Hook(void* relay, const void* action) {
+				const auto descriptor = action == nullptr
+					? nullptr
+					: *reinterpret_cast<const std::uint32_t* const*>(action);
+				const bool descriptorValid = descriptor != nullptr && descriptor[0] < 8;
+				const bool resourceEnabled = action != nullptr
+					&& *reinterpret_cast<const std::uint32_t*>(
+						reinterpret_cast<const std::uint8_t*>(action) + 8
+					) != 0;
+				const std::uint32_t playbackUiMask = playbackAction.input & UiPadMask;
+				const bool playbackUiDirection =
+					(playbackUiMask & DirectionButtonMask) != 0;
+				const bool playbackUiShoulderTrigger =
+					(playbackUiMask & ShoulderTriggerMask) != 0;
+				const bool playbackUiRelayType = descriptorValid
+					&& !playbackUiDirection
+					&& (descriptor[0] == 2
+						|| (playbackUiShoulderTrigger
+							&& (descriptor[0] == 0 || descriptor[0] == 4)));
+				if(
+					playbackOverrideActive
+					&& playbackMode == PlaybackMode::StandardMenu
+					&& IsUiPadAction(playbackAction.input)
+					&& descriptorValid
+					&& resourceEnabled
+					&& playbackUiRelayType
+					&& descriptor[1] < 32
+					&& (playbackUiMask
+						& (std::uint32_t {1} << descriptor[1])) != 0
+				) {
+					const AcceptedAction acceptedAction = playbackAction;
+					playbackAction = {};
+					if(acceptedActionCallback != nullptr)
+						acceptedActionCallback(acceptedAction, ActionSource::Playback);
+					return true;
+				}
+
+				if(
+					playbackOverrideActive
+					&& playbackMode == PlaybackMode::StandardMenu
+					&& IsUiPadAction(playbackAction.input)
+					&& ((playbackAction.input & UiPadMask) & DirectionButtonMask) == 0
+				)
+					return false;
+
+				if(playbackOverrideActive && IsEncodedAction(playbackAction.input)) {
+					if(
+						descriptorValid
+						&& resourceEnabled
+						&& ActionMatches(playbackAction.input, descriptor[0], descriptor[1])
+					) {
+						const AcceptedAction acceptedAction = playbackAction;
+						playbackAction = {};
+						if(acceptedActionCallback != nullptr)
+							acceptedActionCallback(acceptedAction, ActionSource::Playback);
+						return true;
+					}
+					return false;
+				}
+
 				const bool accepted = Orig(relay, action);
-				if(!Enabled || !accepted || GetPendingMask() == 0 || action == nullptr)
+				if(!accepted || !descriptorValid)
 					return accepted;
 
-				const auto descriptor =
-					*reinterpret_cast<const std::uint32_t* const*>(action);
-				if(descriptor == nullptr)
-					return accepted;
-
-				const std::uint32_t inputType = descriptor[0];
 				const std::uint32_t buttonIndex = descriptor[1];
-				if(inputType < 8 && buttonIndex < 32) {
+				if(buttonIndex < 32) {
 					const std::uint32_t bit = std::uint32_t {1} << buttonIndex;
-					if((GetPendingMask() & bit) != 0)
+					if(
+						playbackOverrideActive
+						&& !IsUiPadAction(playbackAction.input)
+						&& !IsEncodedAction(playbackAction.input)
+						&& (playbackAction.input & bit) != 0
+					) {
+						const AcceptedAction acceptedAction = playbackAction;
+						playbackAction = {};
+						if(acceptedActionCallback != nullptr)
+							acceptedActionCallback(acceptedAction, ActionSource::Playback);
+					}
+					if(Enabled && (GetPendingMask() & bit) != 0)
 						Consume(bit);
 				}
 				return accepted;
+			}
+		};
+
+		struct UIInputManagerRegisterHook
+			: skylaunch::hook::Trampoline<UIInputManagerRegisterHook> {
+			static std::uint32_t Hook(
+				void* manager,
+				void* inputLayer,
+				const char* name
+			) {
+				const std::uint32_t handle = Orig(manager, inputLayer, name);
+				RegisterInputLayer(inputLayer, handle);
+				return handle;
+			}
+		};
+
+		struct UIInputManagerReleaseHook
+			: skylaunch::hook::Trampoline<UIInputManagerReleaseHook> {
+			static void Hook(void* manager, std::uint32_t handle) {
+				Orig(manager, handle);
+				ReleaseInputLayer(handle);
 			}
 		};
 	} // namespace
 
 	void Clear() {
 		buttonFrames.fill(0);
-		physicalDown = 0;
-		physicalHeld = 0;
 		leftStick = {};
 		rightStick = {};
 	}
@@ -249,6 +602,38 @@ namespace xenomods::InputBuffer {
 		leftStickOverrideActive = active;
 		leftStickOverrideX = active ? std::clamp(x, -1.f, 1.f) : 0.f;
 		leftStickOverrideY = active ? std::clamp(y, -1.f, 1.f) : 0.f;
+	}
+
+	void SetAcceptedActionCallback(AcceptedActionCallback callback) {
+		acceptedActionCallback = callback;
+	}
+
+	void SetAcceptedActionCapture(bool active) {
+		acceptedActionCaptureActive = active;
+		acceptedActionCaptureWaitingForNeutral = active;
+		activeUiPadDataValid = false;
+	}
+
+	bool AcceptedActionCaptureWaitingForNeutral() {
+		return acceptedActionCaptureActive && acceptedActionCaptureWaitingForNeutral;
+	}
+
+	void SetPlaybackOverride(bool active, PlaybackMode mode) {
+		playbackOverrideActive = active;
+		playbackMode = active ? mode : PlaybackMode::StandardMenu;
+		if(!active) {
+			playbackAction = {};
+		}
+		playbackUiActionOffered = false;
+		playbackUiDirectActionOffered = false;
+	}
+
+	void SetPlaybackAction(AcceptedAction action) {
+		playbackAction = playbackOverrideActive ? action : AcceptedAction {};
+	}
+
+	bool PlaybackActionPending() {
+		return playbackOverrideActive && playbackAction.input != 0;
 	}
 
 	void DrawMenu() {
@@ -275,10 +660,19 @@ namespace xenomods::InputBuffer {
 
 		GetBtnHook::HookAt("_ZN2ml6DevPad6getBtnEi");
 		GetDownHook::HookAt("_ZN2ml6DevPad7getDownEi");
+		GetUpHook::HookAt("_ZN2ml6DevPad5getUpEi");
 		GetALXHook::HookAt("_ZN2ml6DevPad6getALXEib");
 		GetALYHook::HookAt("_ZN2ml6DevPad6getALYEib");
 		GetARXHook::HookAt("_ZN2ml6DevPad6getARXEib");
 		GetARYHook::HookAt("_ZN2ml6DevPad6getARYEib");
+		UIUtilGetPadDataHook::HookAt("_ZN2ui6UIUtil10getPadDataEv");
+		UIInputLayerUpdateHook::HookAt("_ZN2ui12UIInputLayer6updateEv");
+		UIInputManagerRegisterHook::HookAt(
+			"_ZN2ui14UIInputManager16registInputLayerEPNS_12UIInputLayerEPKc"
+		);
+		UIInputManagerReleaseHook::HookAt(
+			"_ZN2ui14UIInputManager17releaseInputLayerEj"
+		);
 		PadRelayCheckActionHook::HookAt(
 			"_ZN2fw8PadRelay11checkActionERKNS_9ResActionE"
 		);

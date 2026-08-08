@@ -12,6 +12,9 @@ namespace xenomods::toolwindow {
 	inline constexpr float Left = 2.f;
 	inline constexpr float Top = 20.f;
 	inline constexpr float Gap = 4.f;
+	// Updated by the right-side Frame Counter so Targeting can dock directly
+	// beneath its actual rendered height instead of relying on an estimate.
+	inline float RightDockTop = Top;
 
 	enum class StackSlot : std::size_t {
 		Telemetry,

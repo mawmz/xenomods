@@ -25,9 +25,11 @@ add_executable(xenomods
 		xenomods/modules/RenderingControls.cpp
 		xenomods/modules/BattleCheats.cpp
 		xenomods/modules/CombatAiDebug.cpp
+		xenomods/modules/ReactionControls.cpp
 		xenomods/modules/PartyEditor.cpp
 		xenomods/modules/PlayerMovement.cpp
 		xenomods/modules/Targeting.cpp
+		xenomods/modules/MenuHelper.cpp
 		xenomods/modules/FrameratePatch.cpp
 		xenomods/modules/FileDetours.cpp
 		xenomods/modules/BdatOverride.cpp

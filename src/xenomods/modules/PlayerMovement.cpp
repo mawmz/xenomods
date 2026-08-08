@@ -13,6 +13,7 @@
 #include "xenomods/engine/game/Controllers.hpp"
 #include "xenomods/engine/game/Utils.hpp"
 #include "xenomods/engine/gf/Data.hpp"
+#include "xenomods/engine/gf/Manager.hpp"
 #include "xenomods/engine/gf/Party.hpp"
 #include "xenomods/engine/gf/PlayerController.hpp"
 #include "xenomods/engine/mm/mtl/RTTI.hpp"
@@ -105,6 +106,18 @@ namespace {
 		}
 	};
 
+	struct AllowMidairPause : skylaunch::hook::Trampoline<AllowMidairPause> {
+		static bool Hook() {
+			if(
+				xenomods::PlayerMovement::allowPauseInMidair
+				&& gf::GfGameManager::isField()
+				&& !gf::GfGameManager::isBattle()
+			)
+				return true;
+			return Orig();
+		}
+	};
+
 #elif XENOMODS_NEW_ENGINE
 
 	bool ValidToChange(game::CharacterController* cc) {
@@ -152,6 +165,7 @@ namespace xenomods {
 
 	bool PlayerMovement::moonJump = false;
 	bool PlayerMovement::disableFallDamage = false;
+	bool PlayerMovement::allowPauseInMidair = false;
 	float PlayerMovement::movementSpeedMult = 1.f;
 
 	std::vector<PlayerMovement::WarpData> PlayerMovement::Warps = {};
@@ -161,7 +175,17 @@ namespace xenomods {
 	bool PlayerMovement::ShowWarpsOnMap = false;
 	bool PlayerMovement::ShowPlayerTelemetry = false;
 
+	bool PlayerMovement::IsPartyAirborne() {
+#if XENOMODS_OLD_ENGINE
+		return !IsSceneTransitionActive() && playerMovementStateValid && playerAirborne;
+#else
+		return false;
+#endif
+	}
+
 	glm::vec3* PlayerMovement::GetPartyPosition() {
+		if(IsSceneTransitionActive())
+			return nullptr;
 #if XENOMODS_OLD_ENGINE
 		gf::GfComTransform* trans = gf::GfGameParty::getLeaderTransform();
 		if(trans != nullptr)
@@ -183,6 +207,8 @@ namespace xenomods {
 		return nullptr;
 	}
 	void PlayerMovement::SetPartyPosition(glm::vec3 pos) {
+		if(IsSceneTransitionActive())
+			return;
 #if XENOMODS_OLD_ENGINE
 		gf::GfComTransform* trans = gf::GfGameParty::getLeaderTransform();
 		if(trans != nullptr)
@@ -205,6 +231,8 @@ namespace xenomods {
 #endif
 	}
 	glm::quat* PlayerMovement::GetPartyRotation() {
+		if(IsSceneTransitionActive())
+			return nullptr;
 #if XENOMODS_OLD_ENGINE
 		gf::GfComTransform* trans = gf::GfGameParty::getLeaderTransform();
 		if(trans != nullptr)
@@ -226,6 +254,8 @@ namespace xenomods {
 		return nullptr;
 	}
 	void PlayerMovement::SetPartyRotation(glm::quat rot) {
+		if(IsSceneTransitionActive())
+			return;
 #if XENOMODS_OLD_ENGINE
 		gf::GfComTransform* trans = gf::GfGameParty::getLeaderTransform();
 		if(trans != nullptr)
@@ -247,6 +277,8 @@ namespace xenomods {
 	}
 
 	glm::vec3* PlayerMovement::GetPartyVelocity() {
+		if(IsSceneTransitionActive())
+			return nullptr;
 #if XENOMODS_OLD_ENGINE
 		if(hasPreviousPlayerPosition)
 			return &measuredPlayerVelocity;
@@ -267,6 +299,8 @@ namespace xenomods {
 		return nullptr;
 	}
 	void PlayerMovement::SetPartyVelocity(glm::vec3 vel) {
+		if(IsSceneTransitionActive())
+			return;
 #if XENOMODS_OLD_ENGINE
 		// TODO
 #elif XENOMODS_CODENAME(bfsw)
@@ -597,6 +631,9 @@ namespace xenomods {
 			InputBuffer::DrawMenu();
 		ImGui::Separator();
 		ImGui::Checkbox("Disable fall damage", &disableFallDamage);
+#if XENOMODS_OLD_ENGINE
+		ImGui::Checkbox("Allow pausing in midair", &allowPauseInMidair);
+#endif
 		ImGui::PushItemWidth(150.f);
 		imguiext::InputFloatExt("Movement speed multiplier", &movementSpeedMult, 1.f, 5.f, 2.f, "%.2f");
 		ImGui::PopItemWidth();
@@ -859,6 +896,7 @@ namespace xenomods {
 		DisableStateUtilFallDamage::HookAt("_ZN2gf2pc9StateUtil20setFallDamageDisableERNS_15GfComBehaviorPcEb");
 
 		CorrectCameraTarget::HookAt("_ZN2gf18PlayerCameraTarget15writeTargetInfoEv");
+		AllowMidairPause::HookAt("_ZN2gf13GfGameManager20isEnableOpenMainMenuEv");
 #if XENOMODS_CODENAME(bf2)
 		RestoreNormalCameraState::HookAt(
 			"_ZN2gf12PlayerCamera6updateERKN2fw10UpdateInfoE"
@@ -981,7 +1019,7 @@ namespace xenomods {
 #endif
 	}
 
-	void PlayerMovement::OnMapChange(unsigned short mapId) {
+	void PlayerMovement::OnSceneTransition() {
 #if XENOMODS_OLD_ENGINE
 		measuredPlayerVelocity = {};
 		hasPreviousPlayerPosition = false;
@@ -989,7 +1027,9 @@ namespace xenomods {
 		playerWallContactValid = false;
 		playerCollisionStateValid = false;
 #endif
+	}
 
+	void PlayerMovement::OnMapChange(unsigned short mapId) {
 		if(detail::IsModuleRegistered(STRINGIFY(DebugStuff)))
 			cacheMapName = DebugStuff::GetMapName(mapId);
 

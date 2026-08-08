@@ -34,6 +34,10 @@ namespace xenomods {
 			return false;
 		}
 
+		virtual bool UpdatesDuringSceneTransition() const {
+			return false;
+		}
+
 		virtual void Update(fw::UpdateInfo* updateInfo) {
 		}
 
@@ -41,6 +45,9 @@ namespace xenomods {
 		}
 
 		virtual void OnMapChange(unsigned short mapId) {
+		}
+
+		virtual void OnSceneTransition() {
 		}
 	};
 
@@ -78,6 +85,11 @@ namespace xenomods {
 	 * NOTE: Only done on a successful config reload.
 	 */
 	void ConfigUpdateForAllRegisteredModules();
+
+	/**
+	 * Gives modules a chance to release outgoing-scene state before teardown.
+	 */
+	void SceneTransitionForAllRegisteredModules();
 
 	/**
 	 * Notifies all modules about a map change.

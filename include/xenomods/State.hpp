@@ -2,6 +2,7 @@
 
 #include <toml++/toml.h>
 
+#include <atomic>
 #include <cstdint>
 #include <vector>
 
@@ -80,6 +81,12 @@ namespace xenomods {
 	 */
 	XenomodsState& GetState();
 
+	bool IsSceneTransitionActive();
+	bool IsSceneTransitionCompletionArmed();
+	void BeginSceneTransition();
+	void ArmSceneTransitionCompletion();
+	void EndSceneTransition();
+
 	struct XenomodsState {
 		explicit XenomodsState() {
 			Reset();
@@ -99,6 +106,8 @@ namespace xenomods {
 		}
 
 		Config config {};
+		std::atomic_bool sceneTransitionActive = false;
+		std::atomic_bool sceneTransitionCompletionArmed = false;
 	};
 
 } // namespace xenomods

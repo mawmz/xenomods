@@ -200,7 +200,7 @@ namespace {
 			this_pointer->objCam->AttrTransformPtr->target;
 		xenomods::CameraTools::HasNormalCamTarget = true;
 		xenomods::CameraTools::UpdateMeta();
-		xenomods::CameraTools::HasCameraState = true;
+				xenomods::CameraTools::HasCameraState = true;
 
 		this_pointer->objCam->setViewMatrix(
 			glm::inverse(static_cast<const glm::mat4&>(
@@ -236,8 +236,17 @@ struct CopyCurrentCameraState : skylaunch::hook::Trampoline<CopyCurrentCameraSta
 					this_pointer->AttrTransformPtr->target;
 				xenomods::CameraTools::HasNormalCamTarget = true;
 				xenomods::CameraTools::UpdateMeta();
-				xenomods::CameraTools::HasCameraState = true;
+				 xenomods::CameraTools::HasCameraState = true;
 			}
+
+#if XENOMODS_OLD_ENGINE
+			if(
+				xenomods::IsSceneTransitionActive()
+				&& xenomods::IsSceneTransitionCompletionArmed()
+				&& gf::GfGameParty::getLeaderTransform() != nullptr
+			)
+				xenomods::EndSceneTransition();
+#endif
 		}
 	}
 };
@@ -863,11 +872,14 @@ namespace xenomods {
 		}
 	}
 
-	void CameraTools::OnMapChange(unsigned short) {
+	void CameraTools::OnSceneTransition() {
 		// Camera state points into the outgoing scene. Do not let consumers use
 		// it until CopyCurrentCameraState observes the new scene camera.
 		HasCameraState = false;
 		HasNormalCamTarget = false;
+	}
+
+	void CameraTools::OnMapChange(unsigned short) {
 	}
 
 	XENOMODS_REGISTER_MODULE(CameraTools);

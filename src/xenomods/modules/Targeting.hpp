@@ -11,7 +11,10 @@ namespace xenomods {
 	struct Targeting : public UpdatableModule {
 		enum class TargetType {
 			Position,
-			Delay
+			Delay,
+			ShopTas,
+			MenuTas,
+			TravelTas
 		};
 
 		struct TargetData {
@@ -21,6 +24,7 @@ namespace xenomods {
 			unsigned short mapId {};
 			glm::vec3 position {};
 			int delayFrames = 60;
+			bool intermediate = false;
 		};
 
 		static std::vector<TargetData> Targets;
@@ -38,6 +42,11 @@ namespace xenomods {
 		static void SaveTargetsToFile();
 		static TargetData* NewTarget();
 		static int NewDelay(int insertAfter = -1);
+		static int NewSpecialStep(
+			TargetType type,
+			int insertAfter = -1,
+			bool intermediate = false
+		);
 		static void SetTarget(TargetData* target);
 		static void StopRoute();
 
@@ -46,6 +55,7 @@ namespace xenomods {
 			return true;
 		}
 		void Update(fw::UpdateInfo* updateInfo) override;
+		void OnSceneTransition() override;
 		void OnMapChange(unsigned short mapId) override;
 	};
 

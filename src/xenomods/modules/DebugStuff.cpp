@@ -1,4 +1,5 @@
 #include "DebugStuff.hpp"
+#include "MenuHelper.hpp"
 #include "ToolWindowLayout.hpp"
 
 #include "xenomods/engine/apps/FrameworkLauncher.hpp"
@@ -1163,6 +1164,9 @@ namespace {
 	}
 
 	TutorialTriggerEntry* CaptureTutorialTrigger(void* tutorial) {
+		if(xenomods::IsSceneTransitionActive())
+			return nullptr;
+
 		auto entry = FindTutorialTrigger(tutorial);
 		if(entry == nullptr) {
 			if(tutorialTriggerCount >= tutorialTriggers.size()) {
@@ -1265,6 +1269,9 @@ namespace {
 	}
 
 	CutsceneTriggerEntry* CaptureCutsceneTrigger(void* event) {
+		if(xenomods::IsSceneTransitionActive())
+			return nullptr;
+
 		auto entry = FindCutsceneTrigger(event);
 		if(entry == nullptr) {
 			if(cutsceneTriggerCount >= cutsceneTriggers.size()) {
@@ -1336,6 +1343,9 @@ namespace {
 	}
 
 	LandmarkTriggerEntry* CaptureLandmarkTrigger(void* landmark) {
+		if(xenomods::IsSceneTransitionActive())
+			return nullptr;
+
 		auto entry = FindLandmarkTrigger(landmark);
 		if(entry == nullptr) {
 			if(landmarkTriggerCount >= landmarkTriggers.size()) {
@@ -1397,7 +1407,7 @@ namespace {
 	}
 
 	void CaptureCollectionAccessParam(const CollectionAccessParam* param) {
-		if(param == nullptr)
+		if(xenomods::IsSceneTransitionActive() || param == nullptr)
 			return;
 		if(
 			!std::isfinite(param->forwardOffset)
@@ -1425,7 +1435,7 @@ namespace {
 	}
 
 	void CaptureCollectionAccessResource(const void* plugin) {
-		if(plugin == nullptr)
+		if(xenomods::IsSceneTransitionActive() || plugin == nullptr)
 			return;
 
 		// AccessPlugin owns a pointer to the shared access-parameter resource
@@ -1472,7 +1482,7 @@ namespace {
 	}
 
 	CollectionPointEntry* CaptureCollectionPoint(void* collection) {
-		if(collection == nullptr)
+		if(xenomods::IsSceneTransitionActive() || collection == nullptr)
 			return nullptr;
 
 		auto entry = FindCollectionPoint(collection);
@@ -2525,7 +2535,6 @@ namespace {
 			return xenomods::DebugStuff::accessClosedLandmarks || result;
 		}
 	};
-
 	struct JumpToClosedLandmarks_IsFound : skylaunch::hook::Trampoline<JumpToClosedLandmarks_IsFound> {
 		static bool Hook(gmk::GmkLandmark* this_pointer) {
 			bool result = Orig(this_pointer);
@@ -2564,7 +2573,7 @@ namespace xenomods {
 	bool DebugStuff::renderLandmarkTrigger = false;
 	bool DebugStuff::renderCollectionPointRange = false;
 	bool DebugStuff::infiniteCollectionPoints = false;
-	bool DebugStuff::minimumCollectionItemDistance = false;
+	bool DebugStuff::minimumCollectionItemDistance = true;
 	bool DebugStuff::traceLocalGameFlags = false;
 	bool DebugStuff::traceTutorialCallSites = false;
 	bool DebugStuff::showTriggerVisualizer = false;
@@ -2678,6 +2687,7 @@ namespace xenomods {
 	void DebugStuff::ReloadSave() {
 #if XENOMODS_OLD_ENGINE
 		reloadPrimarySavePending = true;
+		BeginSceneTransition();
 		// Start the normal field-to-title teardown. The required title event
 		// provides the render-scene transition barrier; only the fullscreen
 		// title menu itself is skipped before submitting Continue.
@@ -3529,13 +3539,16 @@ namespace xenomods {
 		}
 	}
 
-	void DebugStuff::OnMapChange(unsigned short mapId) {
+	void DebugStuff::OnSceneTransition() {
 #if XENOMODS_OLD_ENGINE
 		ClearTutorialTriggerRegistry();
 		ClearCutsceneTriggerRegistry();
 		ClearLandmarkTriggerRegistry();
 		ClearCollectionPointRegistry();
 #endif
+	}
+
+	void DebugStuff::OnMapChange(unsigned short mapId) {
 	}
 
 	XENOMODS_REGISTER_MODULE(DebugStuff);

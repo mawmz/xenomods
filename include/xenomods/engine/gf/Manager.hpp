@@ -25,6 +25,11 @@ namespace gf {
 
 		static bool isClearGame();
 		static bool isControlFree();
+		static bool isField();
+		static bool isBattle();
+		static bool isInGamePauseMenuOK();
+		static bool isEnableOpenMainMenu();
+		static bool isEnableOpenMainMenuSequence();
 
 		static bool isGameTypeIra();
 	};

@@ -6,7 +6,7 @@
 
 namespace xenomods {
 
-	constexpr auto MAX_MODULES = 16;
+	constexpr auto MAX_MODULES = 32;
 
 	//std::vector<UpdatableModule*> registeredModules;
 
@@ -34,7 +34,7 @@ namespace xenomods {
 		}
 
 		void RegisterModule(const char* name, UpdatableModule* module) {
-			if(module == nullptr)
+			if(module == nullptr || moduleIndex >= static_cast<int>(registeredModules.size()))
 				return;
 
 			//if(registeredModules == nullptr)
@@ -65,15 +65,30 @@ namespace xenomods {
 	}
 
 	void UpdateAllRegisteredModules(fw::UpdateInfo* updateInfo) {
-		for(int i = 0; i < moduleIndex; ++i)
-			if(registeredModules[i].modulePtr->NeedsUpdate())
-				registeredModules[i].modulePtr->Update(updateInfo);
+		const bool sceneTransitionActive = IsSceneTransitionActive();
+		for(int i = 0; i < moduleIndex; ++i) {
+			auto* module = registeredModules[i].modulePtr;
+			if(
+				module->NeedsUpdate()
+				&& (
+					!sceneTransitionActive
+					|| module->UpdatesDuringSceneTransition()
+				)
+			)
+				module->Update(updateInfo);
+		}
 	}
 
 	void ConfigUpdateForAllRegisteredModules() {
 		for(int i = 0; i < moduleIndex; ++i)
 			if(registeredModules[i].modulePtr->HasInitialized)
 				registeredModules[i].modulePtr->OnConfigUpdate();
+	}
+
+	void SceneTransitionForAllRegisteredModules() {
+		for(int i = 0; i < moduleIndex; ++i)
+			if(registeredModules[i].modulePtr->HasInitialized)
+				registeredModules[i].modulePtr->OnSceneTransition();
 	}
 
 	void MapChangeForAllRegisteredModules(unsigned short mapId) {

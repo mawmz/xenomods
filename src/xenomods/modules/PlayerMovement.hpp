@@ -8,6 +8,7 @@ namespace xenomods {
 	struct PlayerMovement : public xenomods::UpdatableModule {
 		static bool moonJump;
 		static bool disableFallDamage;
+		static bool allowPauseInMidair;
 		static float movementSpeedMult;
 
 		struct WarpData {
@@ -39,6 +40,7 @@ namespace xenomods {
 
 		static glm::vec3* GetPartyVelocity();
 		static void SetPartyVelocity(glm::vec3 vel);
+		static bool IsPartyAirborne();
 
 		static WarpData* NewWarp();
 		static void SetWarp(WarpData* warp);
@@ -64,6 +66,7 @@ namespace xenomods {
 			return true;
 		}
 		void Update(fw::UpdateInfo* updateInfo) override;
+		void OnSceneTransition() override;
 		void OnMapChange(unsigned short mapId) override;
 	};
 

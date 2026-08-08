@@ -183,4 +183,40 @@ namespace xenomods {
 		return state;
 	}
 
+	bool IsSceneTransitionActive() {
+		return GetState().sceneTransitionActive;
+	}
+
+	bool IsSceneTransitionCompletionArmed() {
+		return GetState().sceneTransitionCompletionArmed;
+	}
+
+	void BeginSceneTransition() {
+		auto& state = GetState();
+		if(state.sceneTransitionActive)
+			return;
+
+		state.sceneTransitionActive = true;
+		state.sceneTransitionCompletionArmed = false;
+		SceneTransitionForAllRegisteredModules();
+	}
+
+	void ArmSceneTransitionCompletion() {
+		auto& state = GetState();
+		if(state.sceneTransitionActive)
+			state.sceneTransitionCompletionArmed = true;
+	}
+
+	void EndSceneTransition() {
+		auto& state = GetState();
+		if(
+			!state.sceneTransitionActive
+			|| !state.sceneTransitionCompletionArmed
+		)
+			return;
+
+		state.sceneTransitionActive = false;
+		state.sceneTransitionCompletionArmed = false;
+	}
+
 } // namespace xenomods

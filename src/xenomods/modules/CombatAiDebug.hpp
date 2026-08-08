@@ -20,6 +20,9 @@ namespace xenomods {
 		bool NeedsUpdate() const override {
 			return true;
 		}
+		bool UpdatesDuringSceneTransition() const override {
+			return true;
+		}
 		void Update(fw::UpdateInfo* updateInfo) override;
 		void OnMapChange(unsigned short mapId) override;
 	};

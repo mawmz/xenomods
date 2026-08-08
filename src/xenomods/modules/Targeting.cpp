@@ -2,6 +2,7 @@
 
 #include "CameraTools.hpp"
 #include "DebugStuff.hpp"
+#include "MenuHelper.hpp"
 #include "PlayerMovement.hpp"
 #include "ToolWindowLayout.hpp"
 
@@ -43,11 +44,29 @@ namespace xenomods {
 		int trackedTargetIndex = -1;
 		glm::vec3 previousTargetDelta {};
 		bool hasPreviousTargetDelta = false;
+		bool targetingMenuTasPlayback = false;
 
 		void ResetTargetApproach() {
 			trackedTargetIndex = -1;
 			previousTargetDelta = {};
 			hasPreviousTargetDelta = false;
+		}
+
+		bool IsMenuTasStep(const Targeting::TargetData& target) {
+			return target.type == Targeting::TargetType::MenuTas
+				|| target.type == Targeting::TargetType::TravelTas;
+		}
+
+		bool StartMenuTasStep(const Targeting::TargetData& target) {
+			return target.type == Targeting::TargetType::TravelTas
+				? MenuHelper::StartTravelMenuPlayback(target.name)
+				: MenuHelper::StartMainMenuPlayback(target.name);
+		}
+
+		bool ArmMenuTasStep(const Targeting::TargetData& target) {
+			return target.type == Targeting::TargetType::TravelTas
+				? MenuHelper::ArmTravelMenuPlayback(target.name)
+				: MenuHelper::ArmMainMenuPlayback(target.name);
 		}
 
 		bool IsFinite(const glm::vec3& value) {
@@ -157,13 +176,12 @@ namespace xenomods {
 				g_Logger->ToastWarning("targeting", "No targets exist for this map");
 				return;
 			}
-
 			if(Targeting::WarpToStart) {
 				int warpIndex = activeTargetIndex;
 				while(
 					warpIndex >= 0
 					&& Targeting::Targets[warpIndex].type
-						== Targeting::TargetType::Delay
+						!= Targeting::TargetType::Position
 				)
 					warpIndex = FindNextTargetForMap(warpIndex, mapId);
 				if(warpIndex >= 0) {
@@ -238,6 +256,51 @@ namespace xenomods {
 			}
 			return false;
 		}
+
+		bool ConsumeActiveSpecialSteps(unsigned short mapId) {
+			while(
+				activeTargetIndex >= 0
+				&& activeTargetIndex < static_cast<int>(Targeting::Targets.size())
+				&& Targeting::Targets[activeTargetIndex].mapId == mapId
+				&& Targeting::Targets[activeTargetIndex].type
+					!= Targeting::TargetType::Position
+			) {
+				if(Targeting::Targets[activeTargetIndex].type == Targeting::TargetType::Delay) {
+					if(ConsumeActiveDelaySteps(mapId))
+						return true;
+					continue;
+				}
+
+				const auto& step = Targeting::Targets[activeTargetIndex];
+				ResetTargetApproach();
+				InputBuffer::SetLeftStickOverride(false);
+
+				if(step.type == Targeting::TargetType::ShopTas) {
+					MenuHelper::ArmShopPlayback(step.name);
+				} else if(IsMenuTasStep(step) && !step.intermediate) {
+					return false;
+				} else if(IsMenuTasStep(step) && !ArmMenuTasStep(step)) {
+					Targeting::StopRoute();
+					g_Logger->ToastWarning(
+						"targeting",
+						"Could not initialize {}",
+						step.type == Targeting::TargetType::TravelTas
+							? "TravelTAS"
+							: "MenuTAS"
+					);
+					return true;
+				}
+
+				activeTargetIndex = FindNextTargetForMap(activeTargetIndex, mapId);
+				if(activeTargetIndex < 0) {
+					Targeting::StopRoute();
+					g_Logger->ToastInfo("targeting", "Target route complete");
+					return true;
+				}
+			}
+			return false;
+		}
+
 	} // namespace
 
 	void Targeting::StopRoute() {
@@ -248,6 +311,7 @@ namespace xenomods {
 		activeDelayIndex = -1;
 		delayFramesRemaining = 0;
 		ResetTargetApproach();
+		targetingMenuTasPlayback = false;
 		InputBuffer::SetLeftStickOverride(false);
 	}
 
@@ -278,10 +342,16 @@ namespace xenomods {
 				continue;
 
 			TargetData target;
-			target.type = (*entry)["type"].value_or<std::string>("position")
-				== "delay"
+			const auto type = (*entry)["type"].value_or<std::string>("position");
+			target.type = type == "delay"
 				? TargetType::Delay
-				: TargetType::Position;
+				: type == "shop_tas"
+					? TargetType::ShopTas
+					: type == "menu_tas"
+						? TargetType::MenuTas
+						: type == "travel_tas"
+							? TargetType::TravelTas
+							: TargetType::Position;
 			target.mapId = static_cast<unsigned short>(mapIdValue);
 			target.mapName =
 				(*entry)["mapNameReadOnly"].value_or<std::string>("Unknown");
@@ -295,7 +365,7 @@ namespace xenomods {
 					0,
 					std::numeric_limits<int>::max()
 				));
-			} else {
+			} else if(target.type == TargetType::Position) {
 				target.name = (*entry)["name"].value_or<std::string>("Target");
 				const auto position = entry->get_as<toml::array>("position");
 				if(position == nullptr || position->size() < 3)
@@ -305,6 +375,23 @@ namespace xenomods {
 				target.position.z = (*position)[2].value_or(0.f);
 				if(!IsFinite(target.position))
 					continue;
+			} else {
+				target.name = (*entry)["recording"].value_or<std::string>("");
+				if(
+					target.type == TargetType::MenuTas
+					|| target.type == TargetType::TravelTas
+				) {
+					target.intermediate =
+						(*entry)["intermediate"].value_or(false);
+					const auto position = entry->get_as<toml::array>("position");
+					if(position == nullptr || position->size() < 3)
+						continue;
+					target.position.x = (*position)[0].value_or(0.f);
+					target.position.y = (*position)[1].value_or(0.f);
+					target.position.z = (*position)[2].value_or(0.f);
+					if(!IsFinite(target.position))
+						continue;
+				}
 			}
 			loadedTargets.push_back(std::move(target));
 		}
@@ -318,20 +405,42 @@ namespace xenomods {
 		toml::array allTargets;
 		for(const auto& target : Targets) {
 			toml::table entry;
-			entry.emplace(
-				"type",
-				target.type == TargetType::Delay ? "delay" : "position"
-			);
+			const char* type = "position";
+			if(target.type == TargetType::Delay)
+				type = "delay";
+			else if(target.type == TargetType::ShopTas)
+				type = "shop_tas";
+			else if(target.type == TargetType::MenuTas)
+				type = "menu_tas";
+			else if(target.type == TargetType::TravelTas)
+				type = "travel_tas";
+			entry.emplace("type", type);
 			entry.emplace("mapId", target.mapId);
 			entry.emplace("mapNameReadOnly", target.mapName);
 			if(target.type == TargetType::Delay) {
 				entry.emplace("frames", std::max(0, target.delayFrames));
-			} else {
+			} else if(target.type == TargetType::Position) {
 				entry.emplace("name", target.name);
 				entry.emplace(
 					"position",
 					toml::array {target.position.x, target.position.y, target.position.z}
 				);
+			} else {
+				entry.emplace("recording", target.name);
+				if(
+					target.type == TargetType::MenuTas
+					|| target.type == TargetType::TravelTas
+				) {
+					entry.emplace("intermediate", target.intermediate);
+					entry.emplace(
+						"position",
+						toml::array {
+							target.position.x,
+							target.position.y,
+							target.position.z
+						}
+					);
+				}
 			}
 			allTargets.emplace_back(std::move(entry));
 		}
@@ -401,6 +510,59 @@ namespace xenomods {
 		return insertionIndex;
 	}
 
+	int Targeting::NewSpecialStep(
+		TargetType type,
+		int insertAfter,
+		bool intermediate
+	) {
+		const auto mapId = CurrentMapId();
+		const auto mapName = detail::IsModuleRegistered(STRINGIFY(DebugStuff))
+			? DebugStuff::GetMapName(mapId)
+			: "Unknown";
+		TargetData step {
+			.type = type,
+			.mapName = mapName,
+			.mapId = mapId,
+			.intermediate =
+				(type == TargetType::MenuTas || type == TargetType::TravelTas)
+					&& intermediate
+		};
+		if(type == TargetType::ShopTas) {
+			const auto recordings = MenuHelper::SavedShopRecordingNames();
+			if(!recordings.empty())
+				step.name = recordings.front();
+		} else if(type == TargetType::MenuTas) {
+			const auto recordings = MenuHelper::SavedMenuRecordingNames();
+			if(!recordings.empty())
+				step.name = recordings.front();
+			if(const auto position = PlayerMovement::GetPartyPosition(); position != nullptr)
+				step.position = *position;
+		} else if(type == TargetType::TravelTas) {
+			const auto recordings = MenuHelper::SavedTravelRecordingNames();
+			if(!recordings.empty())
+				step.name = recordings.front();
+			if(const auto position = PlayerMovement::GetPartyPosition(); position != nullptr)
+				step.position = *position;
+		}
+
+		int insertionIndex = static_cast<int>(Targets.size());
+		if(
+			insertAfter >= 0
+			&& insertAfter < static_cast<int>(Targets.size())
+			&& Targets[insertAfter].mapId == mapId
+		) {
+			insertionIndex = insertAfter + 1;
+		} else {
+			for(int index = 0; index < static_cast<int>(Targets.size()); index++) {
+				if(Targets[index].mapId == mapId)
+					insertionIndex = index + 1;
+			}
+		}
+		Targets.insert(Targets.begin() + insertionIndex, std::move(step));
+		StopRoute();
+		return insertionIndex;
+	}
+
 	void Targeting::SetTarget(TargetData* target) {
 		if(target == nullptr || target->type != TargetType::Position)
 			return;
@@ -419,9 +581,8 @@ namespace xenomods {
 			return;
 
 		const auto& io = ImGui::GetIO();
-		constexpr float top = 164.f;
 		constexpr float edge = 2.f;
-		constexpr float width = 260.f;
+		const float top = toolwindow::RightDockTop;
 		ImGui::SetNextWindowPos(
 			ImVec2(io.DisplaySize.x - edge, top),
 			ImGuiCond_Always,
@@ -429,7 +590,7 @@ namespace xenomods {
 		);
 		ImGui::SetNextWindowSize(
 			ImVec2(
-				width,
+				toolwindow::CompactWidth(),
 				std::max(220.f, io.DisplaySize.y - top - edge)
 			),
 			ImGuiCond_Always
@@ -453,9 +614,6 @@ namespace xenomods {
 			NewTarget();
 			selectedIndex = static_cast<int>(Targets.size()) - 1;
 		}
-		ImGui::SameLine();
-		if(ImGui::Button("Add delay"))
-			selectedIndex = NewDelay(selectedIndex);
 		ImGui::SameLine();
 		if(RouteActive) {
 			if(ImGui::Button("Stop"))
@@ -483,6 +641,58 @@ namespace xenomods {
 			);
 			ImGui::PopItemWidth();
 		}
+
+		static TargetType addType = TargetType::Delay;
+		static bool addIntermediate = false;
+		const bool canBeIntermediate =
+			addType == TargetType::MenuTas || addType == TargetType::TravelTas;
+		const char* addTypeName = addType == TargetType::Delay
+			? "Delay"
+			: addType == TargetType::ShopTas
+				? "ShopTAS"
+				: addType == TargetType::MenuTas ? "MenuTAS" : "TravelTAS";
+		const float addStepHeight =
+			ImGui::GetFrameHeight()
+			+ ImGui::GetStyle().WindowPadding.y * 2.f
+			+ (canBeIntermediate ? ImGui::GetFrameHeightWithSpacing() : 0.f);
+		if(ImGui::BeginChild(
+			"AddRouteStep",
+			ImVec2(0.f, addStepHeight),
+			true,
+			ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse
+		)) {
+			ImGui::SetNextItemWidth(120.f);
+			if(ImGui::BeginCombo("##RouteStepType", addTypeName)) {
+				for(const auto type : {
+					TargetType::Delay,
+					TargetType::ShopTas,
+					TargetType::MenuTas,
+					TargetType::TravelTas
+				}) {
+					const char* name = type == TargetType::Delay
+						? "Delay"
+						: type == TargetType::ShopTas
+							? "ShopTAS"
+							: type == TargetType::MenuTas ? "MenuTAS" : "TravelTAS";
+					if(ImGui::Selectable(name, addType == type))
+						addType = type;
+				}
+				ImGui::EndCombo();
+			}
+			ImGui::SameLine();
+			if(ImGui::Button("Add")) {
+				selectedIndex = addType == TargetType::Delay
+					? NewDelay(selectedIndex)
+					: NewSpecialStep(
+						addType,
+						selectedIndex,
+						canBeIntermediate && addIntermediate
+					);
+			}
+			if(canBeIntermediate)
+				ImGui::Checkbox("Intermediate", &addIntermediate);
+		}
+		ImGui::EndChild();
 		if(RouteActive) {
 			if(waitingForPlayer)
 				ImGui::TextDisabled("Route paused: waiting for control");
@@ -490,6 +700,33 @@ namespace xenomods {
 				ImGui::Text("Starting in %d frame(s)", startDelayFrames);
 			else if(activeDelayIndex == activeTargetIndex)
 				ImGui::Text("Delay: %df", delayFramesRemaining);
+			else if(
+				activeTargetIndex >= 0
+				&& activeTargetIndex < static_cast<int>(Targets.size())
+				&& Targets[activeTargetIndex].type == TargetType::ShopTas
+			)
+				ImGui::Text(
+					"ShopTAS: %s",
+					Targets[activeTargetIndex].name.c_str()
+				);
+			else if(
+				activeTargetIndex >= 0
+				&& activeTargetIndex < static_cast<int>(Targets.size())
+				&& Targets[activeTargetIndex].type == TargetType::TravelTas
+			)
+				ImGui::Text(
+					"TravelTAS: %s",
+					Targets[activeTargetIndex].name.c_str()
+				);
+			else if(
+				activeTargetIndex >= 0
+				&& activeTargetIndex < static_cast<int>(Targets.size())
+				&& Targets[activeTargetIndex].type == TargetType::MenuTas
+			)
+				ImGui::Text(
+					"MenuTAS: %s",
+					Targets[activeTargetIndex].name.c_str()
+				);
 			else if(activeTargetIndex >= 0)
 				ImGui::Text("Moving to target %d", RouteNumber(activeTargetIndex));
 		}
@@ -509,8 +746,11 @@ namespace xenomods {
 
 		const bool hasSelection =
 			selectedIndex >= 0 && selectedIndex < static_cast<int>(Targets.size());
+		const bool selectedMenuTas = hasSelection
+			&& IsMenuTasStep(Targets[selectedIndex]);
 		const float editorReserve = hasSelection
-			? ImGui::GetTextLineHeightWithSpacing() * 4.5f
+			? ImGui::GetTextLineHeightWithSpacing()
+				* (selectedMenuTas ? 5.5f : 4.5f)
 				+ ImGui::GetFrameHeightWithSpacing()
 			: 0.f;
 		const float listHeight = std::max(
@@ -520,18 +760,41 @@ namespace xenomods {
 		if(ImGui::BeginChild("TargetList", ImVec2(0.f, listHeight), true)) {
 			for(const int index : visibleIndices) {
 				ImGui::PushID(index);
-				const auto label = Targets[index].type == TargetType::Delay
-					? fmt::format(
+				std::string label;
+				if(Targets[index].type == TargetType::Delay) {
+					label = fmt::format(
 						"Delay: {}f{}",
 						std::max(0, Targets[index].delayFrames),
 						index == activeTargetIndex ? "  [ACTIVE]" : ""
-					)
-					: fmt::format(
+					);
+				} else if(Targets[index].type == TargetType::ShopTas) {
+					label = fmt::format(
+						"ShopTAS: {}{}",
+						Targets[index].name.empty() ? "<select recording>" : Targets[index].name,
+						index == activeTargetIndex ? "  [ACTIVE]" : ""
+					);
+				} else if(Targets[index].type == TargetType::MenuTas) {
+					label = fmt::format(
+						"MenuTAS: {}{}{}",
+						Targets[index].name.empty() ? "<select recording>" : Targets[index].name,
+						Targets[index].intermediate ? "  [INTERMEDIATE]" : "",
+						index == activeTargetIndex ? "  [ACTIVE]" : ""
+					);
+				} else if(Targets[index].type == TargetType::TravelTas) {
+					label = fmt::format(
+						"TravelTAS: {}{}{}",
+						Targets[index].name.empty() ? "<select recording>" : Targets[index].name,
+						Targets[index].intermediate ? "  [INTERMEDIATE]" : "",
+						index == activeTargetIndex ? "  [ACTIVE]" : ""
+					);
+				} else {
+					label = fmt::format(
 						"{}: {}{}",
 						RouteNumber(index),
 						Targets[index].name,
 						index == activeTargetIndex ? "  [ACTIVE]" : ""
 					);
+				}
 				if(ImGui::Selectable(label.c_str(), selectedIndex == index))
 					selectedIndex = index;
 				ImGui::PopID();
@@ -553,7 +816,7 @@ namespace xenomods {
 				))
 					target.delayFrames = std::max(0, target.delayFrames);
 				ImGui::TextDisabled("Delay: %df", std::max(0, target.delayFrames));
-			} else {
+			} else if(target.type == TargetType::Position) {
 				ImGui::InputText("Name", &target.name);
 				ImGui::TextUnformatted("Position");
 				ImGui::SameLine();
@@ -568,6 +831,61 @@ namespace xenomods {
 				if(ImGui::Button("Warp"))
 					WarpToTarget(selectedIndex);
 				ImGui::SameLine();
+			} else if(target.type == TargetType::ShopTas) {
+				const auto recordings = MenuHelper::SavedShopRecordingNames();
+				const char* preview = target.name.empty()
+					? "<select recording>"
+					: target.name.c_str();
+				ImGui::SetNextItemWidth(-1.f);
+				if(ImGui::BeginCombo("Recording", preview)) {
+					for(const auto& recording : recordings) {
+						if(ImGui::Selectable(recording.c_str(), target.name == recording))
+							target.name = recording;
+					}
+					ImGui::EndCombo();
+				}
+				if(recordings.empty())
+					ImGui::TextDisabled("No saved ShopTAS recordings");
+			} else {
+				const auto recordings = target.type == TargetType::TravelTas
+					? MenuHelper::SavedTravelRecordingNames()
+					: MenuHelper::SavedMenuRecordingNames();
+				const char* preview = target.name.empty()
+					? "<select recording>"
+					: target.name.c_str();
+				ImGui::SetNextItemWidth(-1.f);
+				if(ImGui::BeginCombo("Recording", preview)) {
+					for(const auto& recording : recordings) {
+						if(ImGui::Selectable(recording.c_str(), target.name == recording))
+							target.name = recording;
+					}
+					ImGui::EndCombo();
+				}
+				if(recordings.empty())
+					ImGui::TextDisabled(
+						target.type == TargetType::TravelTas
+							? "No saved TravelTAS recordings"
+							: "No saved MenuTAS recordings"
+					);
+				if(ImGui::Checkbox("Intermediate", &target.intermediate))
+					StopRoute();
+				if(target.intermediate) {
+					ImGui::TextDisabled(
+						"Initializer: arms playback and continues the route"
+					);
+				} else {
+					ImGui::TextUnformatted("Map marker");
+					ImGui::SameLine();
+					DrawPreciseCoordinate("X", target.position.x);
+					ImGui::SameLine();
+					DrawPreciseCoordinate("Y", target.position.y);
+					ImGui::SameLine();
+					DrawPreciseCoordinate("Z", target.position.z);
+					if(ImGui::Button("Update marker")) {
+						if(const auto position = PlayerMovement::GetPartyPosition(); position != nullptr)
+							target.position = *position;
+					}
+				}
 			}
 			if(ImGui::Button("Up")) {
 				selectedIndex = MoveTargetWithinMap(selectedIndex, -1);
@@ -608,7 +926,10 @@ namespace xenomods {
 			for(int index = 0; index < static_cast<int>(Targets.size()); index++) {
 				const auto& target = Targets[index];
 				if(
-					target.type != TargetType::Position
+					(target.type != TargetType::Position
+						&& target.type != TargetType::MenuTas
+						&& target.type != TargetType::TravelTas)
+					|| (IsMenuTasStep(target) && target.intermediate)
 					|| target.mapId != mapId
 					|| !IsFinite(target.position)
 				)
@@ -618,15 +939,38 @@ namespace xenomods {
 				fw::debug::drawCompareZ(false);
 				fw::debug::drawAxis(matrix, 2.f);
 				fw::debug::drawCompareZ(true);
-				debug::drawFontFmtShadow3D(
-					target.position,
-					index == activeTargetIndex ? mm::Col4::yellow : mm::Col4::white,
-					"{}: {}",
-					RouteNumber(index),
-					target.name
-				);
+				if(
+					target.type == TargetType::MenuTas
+					|| target.type == TargetType::TravelTas
+				) {
+					debug::drawFontFmtShadow3D(
+						target.position,
+						index == activeTargetIndex ? mm::Col4::yellow : mm::Col4::white,
+						target.type == TargetType::TravelTas
+							? "TravelTAS: {}"
+							: "MenuTAS: {}",
+						target.name
+					);
+				} else {
+					debug::drawFontFmtShadow3D(
+						target.position,
+						index == activeTargetIndex ? mm::Col4::yellow : mm::Col4::white,
+						"{}: {}",
+						RouteNumber(index),
+						target.name
+					);
+				}
 			}
 		}
+		if(
+			targetingMenuTasPlayback
+			&& MenuHelper::IsMenuPlaybackPendingOrActive()
+		) {
+			InputBuffer::SetLeftStickOverride(false);
+			ResetTargetApproach();
+			return;
+		}
+		targetingMenuTasPlayback = false;
 
 		if(!RouteActive) {
 			InputBuffer::SetLeftStickOverride(false);
@@ -642,6 +986,13 @@ namespace xenomods {
 			activeTargetIndex = FindFirstTargetForMap(mapId);
 		if(activeTargetIndex < 0) {
 			InputBuffer::SetLeftStickOverride(false);
+			return;
+		}
+		// ShopTAS is only an arming initializer and can be consumed before
+		// field control returns. MenuTAS opens a real menu and is processed
+		// below after the normal control-safety checks.
+		if(Targets[activeTargetIndex].type == TargetType::ShopTas) {
+			ConsumeActiveSpecialSteps(mapId);
 			return;
 		}
 
@@ -661,7 +1012,6 @@ namespace xenomods {
 		waitingForPlayer = false;
 		if(
 			!IsFinite(*playerPosition)
-			|| !IsFinite(Targets[activeTargetIndex].position)
 			|| !IsFinite(CameraTools::CamMeta.forward)
 		) {
 			InputBuffer::SetLeftStickOverride(false);
@@ -673,10 +1023,17 @@ namespace xenomods {
 			InputBuffer::SetLeftStickOverride(false);
 			return;
 		}
-		if(ConsumeActiveDelaySteps(mapId))
+		if(ConsumeActiveSpecialSteps(mapId)) {
 			return;
+		}
 
-		glm::vec3 delta = Targets[activeTargetIndex].position - *playerPosition;
+		int movementTargetIndex = activeTargetIndex;
+		if(!IsFinite(Targets[movementTargetIndex].position)) {
+			StopRoute();
+			return;
+		}
+
+		glm::vec3 delta = Targets[movementTargetIndex].position - *playerPosition;
 		delta.y = 0.f;
 		float distance = glm::length(delta);
 		const float completionDistance =
@@ -684,9 +1041,36 @@ namespace xenomods {
 		bool crossedExactTarget =
 			!UseArrivalRadius
 			&& hasPreviousTargetDelta
-			&& trackedTargetIndex == activeTargetIndex
+			&& trackedTargetIndex == movementTargetIndex
 			&& glm::dot(previousTargetDelta, delta) <= 0.f;
 		while(distance <= completionDistance || crossedExactTarget) {
+			const auto& reachedTarget = Targets[movementTargetIndex];
+			if(IsMenuTasStep(reachedTarget) && !reachedTarget.intermediate) {
+				InputBuffer::SetLeftStickOverride(false);
+				ResetTargetApproach();
+				if(!StartMenuTasStep(reachedTarget)) {
+					StopRoute();
+					g_Logger->ToastWarning(
+						"targeting",
+						"Could not start {} at its marker",
+						reachedTarget.type == TargetType::TravelTas
+							? "TravelTAS"
+							: "MenuTAS"
+					);
+					return;
+				}
+
+				activeTargetIndex = FindNextTargetForMap(
+					movementTargetIndex,
+					mapId
+				);
+				targetingMenuTasPlayback = true;
+				if(activeTargetIndex < 0) {
+					RouteActive = false;
+					g_Logger->ToastInfo("targeting", "Target route complete");
+				}
+				return;
+			}
 			activeTargetIndex = FindNextTargetForMap(activeTargetIndex, mapId);
 			ResetTargetApproach();
 			if(activeTargetIndex < 0) {
@@ -694,9 +1078,10 @@ namespace xenomods {
 				g_Logger->ToastInfo("targeting", "Target route complete");
 				return;
 			}
-			if(ConsumeActiveDelaySteps(mapId))
+			if(ConsumeActiveSpecialSteps(mapId))
 				return;
-			delta = Targets[activeTargetIndex].position - *playerPosition;
+			movementTargetIndex = activeTargetIndex;
+			delta = Targets[movementTargetIndex].position - *playerPosition;
 			delta.y = 0.f;
 			distance = glm::length(delta);
 			crossedExactTarget = false;
@@ -704,7 +1089,7 @@ namespace xenomods {
 			// below and atomically replaces it with the next target's direction,
 			// leaving no neutral input frame between route points.
 		}
-		trackedTargetIndex = activeTargetIndex;
+		trackedTargetIndex = movementTargetIndex;
 		previousTargetDelta = delta;
 		hasPreviousTargetDelta = true;
 
@@ -727,12 +1112,16 @@ namespace xenomods {
 		);
 	}
 
-	void Targeting::OnMapChange(unsigned short mapId) {
+	void Targeting::OnSceneTransition() {
+		targetingMenuTasPlayback = false;
 		InputBuffer::SetLeftStickOverride(false);
 		ResetTargetApproach();
 		activeDelayIndex = -1;
 		delayFramesRemaining = 0;
 		waitingForPlayer = RouteActive;
+	}
+
+	void Targeting::OnMapChange(unsigned short mapId) {
 		if(
 			RouteActive
 			&& (

@@ -84,7 +84,7 @@ namespace {
 	std::array<std::uint64_t, LoadHistoryCapacity> LoadFrameHistory {};
 	std::size_t LoadHistoryWrite = 0;
 	std::size_t LoadHistoryCount = 0;
-	bool TrackLoadFrames = false;
+	bool TrackLoadFrames = true;
 	std::uint64_t DecisionSequence = 0;
 	std::array<std::uint64_t, SlotCount> SelectedCounts {};
 	std::uint64_t GenericDecisionCount = 0;
@@ -629,8 +629,10 @@ namespace xenomods {
 
 	void CombatAiDebug::FrameCounterOverlay() {
 #if XENOMODS_CODENAME(bf2)
-		if(!ShowFrameCounter)
+		if(!ShowFrameCounter) {
+			toolwindow::RightDockTop = toolwindow::Top;
 			return;
+		}
 		const ImGuiIO& io = ImGui::GetIO();
 		ImGui::SetNextWindowPos(
 			ImVec2(io.DisplaySize.x - 8.f, 20.f),
@@ -651,6 +653,12 @@ namespace xenomods {
 				ImGui::TextColored(ImVec4(0.3f, 1.f, 0.4f, 1.f), "ON");
 			else
 				ImGui::TextDisabled("OFF");
+			ImGui::SameLine();
+			if(ImGui::Button("Clear")) {
+				LoadFrameHistory = {};
+				LoadHistoryWrite = 0;
+				LoadHistoryCount = 0;
+			}
 
 			ImGui::SeparatorText("History");
 			const float historyHeight = ImGui::GetTextLineHeightWithSpacing() * 4.f;
@@ -668,6 +676,8 @@ namespace xenomods {
 			}
 			ImGui::EndChild();
 		}
+		toolwindow::RightDockTop =
+			ImGui::GetWindowPos().y + ImGui::GetWindowSize().y + toolwindow::Gap;
 		ImGui::End();
 #endif
 	}

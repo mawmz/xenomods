@@ -220,22 +220,29 @@ namespace {
 #if XENOMODS_OLD_ENGINE
 	struct OnMapChange : skylaunch::hook::Trampoline<OnMapChange> {
 		static void Hook(uint* GfReqParam) {
+			// execMapjump may consume the request. Read everything needed by
+			// module callbacks before handing ownership to the original function.
+			const unsigned int mapId = GfReqParam != nullptr
+				? gf::GfDataMap::getMapID(*GfReqParam)
+				: 0;
+			xenomods::BeginSceneTransition();
 			Orig(GfReqParam);
 
-			unsigned int mapId = gf::GfDataMap::getMapID(*GfReqParam);
-
 			xenomods::MapChangeForAllRegisteredModules(mapId);
+			xenomods::ArmSceneTransitionCompletion();
 		}
 	};
 #elif XENOMODS_CODENAME(bfsw)
 	struct OnMapChange : skylaunch::hook::Trampoline<OnMapChange> {
 		static void Hook(game::SeqMapJump* this_pointer, game::MapJumpSetupInfo* setupInfo) {
+			xenomods::BeginSceneTransition();
 			Orig(this_pointer, setupInfo);
 
 			std::string thingy = fmt::format("ma{:02}{:02}", setupInfo->chapter, setupInfo->location);
 			unsigned int mapId = game::DataUtil::searchBdatFldMaplistRowID(*xenomods::DocumentPtr, thingy.c_str());
 
 			xenomods::MapChangeForAllRegisteredModules(mapId);
+			xenomods::ArmSceneTransitionCompletion();
 		}
 	};
 #endif
