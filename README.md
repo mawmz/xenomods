@@ -1,4 +1,4 @@
-# Xenomods TAS
+# XenomodsTAS
 
 XenomodsTAS is an in-game toolset for tool-assisted speedrun development, route research, and debugging in *Xenoblade Chronicles 2* and *Torna ~ The Golden Country*.
 
