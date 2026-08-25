@@ -12,6 +12,7 @@
 #include <xenomods/menu/Menu.hpp>
 
 #include "modules/BattleCheats.hpp"
+#include "modules/AudioControls.hpp"
 #include "modules/CameraTools.hpp"
 #include "modules/CombatAiDebug.hpp"
 #include "modules/DebugStuff.hpp"
@@ -35,6 +36,7 @@ namespace xenomods::UtilityMenu {
 			bool telemetry = false;
 			bool triggers = false;
 			bool frameCounter = false;
+			bool backgroundMusic = true;
 			int utilityTab = 0;
 
 			bool operator==(const SavedState&) const = default;
@@ -57,6 +59,7 @@ namespace xenomods::UtilityMenu {
 				PlayerMovement::ShowPlayerTelemetry,
 				DebugStuff::showTriggerVisualizer,
 				CombatAiDebug::ShowFrameCounter,
+				AudioControls::BackgroundMusic,
 				selectedTab
 			};
 		}
@@ -68,13 +71,14 @@ namespace xenomods::UtilityMenu {
 
 			const auto contents = fmt::format(
 				"utility = {}\nwarps = {}\ntargeting = {}\ntelemetry = {}\ntriggers = {}\n"
-				"frame_counter = {}\nutility_tab = {}\n",
+				"frame_counter = {}\nbackground_music = {}\nutility_tab = {}\n",
 				state.utility,
 				state.warps,
 				state.targeting,
 				state.telemetry,
 				state.triggers,
 				state.frameCounter,
+				state.backgroundMusic,
 				state.utilityTab
 			);
 			const auto path = SettingsPath();
@@ -183,6 +187,10 @@ namespace xenomods::UtilityMenu {
 				}
 				ImGui::EndTabItem();
 			}
+			if(Tab("Audio", 4)) {
+				AudioControls::MenuSection();
+				ImGui::EndTabItem();
+			}
 			ImGui::EndTabBar();
 		}
 		applySavedTab = false;
@@ -204,7 +212,9 @@ namespace xenomods::UtilityMenu {
 			PlayerMovement::ShowPlayerTelemetry = table["telemetry"].value_or(false);
 			DebugStuff::showTriggerVisualizer = table["triggers"].value_or(false);
 			CombatAiDebug::ShowFrameCounter = table["frame_counter"].value_or(false);
-			selectedTab = std::clamp(table["utility_tab"].value_or(0), 0, 3);
+			AudioControls::BackgroundMusic =
+				table["background_music"].value_or(true);
+			selectedTab = std::clamp(table["utility_tab"].value_or(0), 0, 4);
 		}
 		lastSaved = CurrentState();
 		g_Menu->RegisterTopBarCallback(&TopBar);

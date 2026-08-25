@@ -23,6 +23,7 @@ add_executable(xenomods
         xenomods/modules/DebugStuff.cpp
 		xenomods/modules/CameraTools.cpp
 		xenomods/modules/RenderingControls.cpp
+		xenomods/modules/AudioControls.cpp
 		xenomods/modules/BattleCheats.cpp
 		xenomods/modules/CombatAiDebug.cpp
 		xenomods/modules/ReactionControls.cpp
