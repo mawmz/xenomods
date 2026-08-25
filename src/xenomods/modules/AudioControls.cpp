@@ -40,10 +40,22 @@ namespace xenomods {
 		SetVolumeFn SetMenuBgmVolume = nullptr;
 
 		void* LastMasterVolume = nullptr;
+		void* ReadyGfSound = nullptr;
 		bool Muted = false;
 		float SavedEventBgmVolume = 1.f;
 		float SavedGameBgmVolume = 1.f;
 		float SavedMenuBgmVolume = 1.f;
+
+		struct GfSoundSetupGameHook
+			: skylaunch::hook::Trampoline<GfSoundSetupGameHook> {
+			static void Hook(void* sound) {
+				Orig(sound);
+				// setupGame is the point at which XC2 has created the master category
+				// handle and copied the user's saved volume options into it. A mute
+				// restored from toolWindows.toml must not touch the setters before this.
+				ReadyGfSound = sound;
+			}
+		};
 
 		bool ResolveAudioFunctions() {
 			const auto singleton = skylaunch::hook::detail::ResolveSymbolBase(
@@ -111,6 +123,7 @@ namespace xenomods {
 			g_Logger->LogError("Background-music control symbols are unavailable");
 		else
 			g_Logger->LogInfo("Background-music controls installed");
+		GfSoundSetupGameHook::HookAt("_ZN2gf7GfSound9setupGameEv");
 #endif
 	}
 
@@ -127,9 +140,12 @@ namespace xenomods {
 		void* const sound = *GfSoundSingleton;
 		if(sound == nullptr) {
 			LastMasterVolume = nullptr;
+			ReadyGfSound = nullptr;
 			Muted = false;
 			return;
 		}
+		if(sound != ReadyGfSound)
+			return;
 
 		void* const masterVolume =
 			reinterpret_cast<std::uint8_t*>(sound) + MasterVolumeOffset;
