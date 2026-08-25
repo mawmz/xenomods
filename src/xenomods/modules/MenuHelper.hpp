@@ -18,10 +18,14 @@ namespace xenomods {
 		static void StatusOverlay();
 		static void OnShopOpened();
 		static void OnShopClosed();
+		static void OnAuxCoreShopOpening();
+		static void OnAuxCoreListInputEnabled(std::uint32_t object);
+		static void OnAuxCoreShopInputReady();
 		static void OnMenuOpening();
 		static void OnMenuOpened();
 		static void OnMenuInputEnabled();
 		static void OnMenuClosed();
+		static void OnTutorialBladeBondRequested();
 		static void OnTravelButtonPressed();
 		static void OnTravelButtonFinished();
 		static void OnTravelOpening();
@@ -38,6 +42,7 @@ namespace xenomods {
 		static bool ArmTravelMenuPlayback(const std::string& recordingName);
 		static bool StartMainMenuPlayback(const std::string& recordingName);
 		static bool StartTravelMenuPlayback(const std::string& recordingName);
+		static bool IsPlaybackPendingOrActive();
 		static bool IsMenuPlaybackPendingOrActive();
 		static void OnAcceptedAction(
 			InputBuffer::AcceptedAction action,

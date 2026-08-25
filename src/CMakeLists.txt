@@ -30,6 +30,7 @@ add_executable(xenomods
 		xenomods/modules/PlayerMovement.cpp
 		xenomods/modules/Targeting.cpp
 		xenomods/modules/MenuHelper.cpp
+		xenomods/modules/SkipTravelProfiler.cpp
 		xenomods/modules/FrameratePatch.cpp
 		xenomods/modules/FileDetours.cpp
 		xenomods/modules/BdatOverride.cpp

@@ -25,6 +25,16 @@ namespace xenomods::InputBuffer {
 		AcceptedAction action,
 		ActionSource source
 	);
+	using InputLayerUpdateCallback = void (*)(
+		std::uint32_t object,
+		const void* inputLayer,
+		std::uint32_t layerHandle,
+		bool afterUpdate,
+		bool accepted,
+		std::uint16_t emittedEvent,
+		std::uint32_t heldButtons,
+		std::uint32_t downButtons
+	);
 
 	extern bool Enabled;
 	extern bool BufferLeftStick;
@@ -37,6 +47,7 @@ namespace xenomods::InputBuffer {
 	std::uint32_t PendingButtons();
 	void SetLeftStickOverride(bool active, float x = 0.f, float y = 0.f);
 	void SetAcceptedActionCallback(AcceptedActionCallback callback);
+	void SetInputLayerUpdateCallback(InputLayerUpdateCallback callback);
 	void SetAcceptedActionCapture(bool active);
 	bool AcceptedActionCaptureWaitingForNeutral();
 	void SetPlaybackOverride(
@@ -45,5 +56,10 @@ namespace xenomods::InputBuffer {
 	);
 	void SetPlaybackAction(AcceptedAction action);
 	bool PlaybackActionPending();
+	void SetFrameIndex(std::uint64_t frame);
+	void SetAuxCoreAmountMenu(bool active, std::uint32_t object = 0);
+	bool AcceptAuxCoreAmountPlayback();
+	bool AcceptAuxCoreAmountInput();
+	void ResetAuxCoreAmountInput();
 
 } // namespace xenomods::InputBuffer

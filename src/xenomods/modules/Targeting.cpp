@@ -274,6 +274,14 @@ namespace xenomods {
 				const auto& step = Targeting::Targets[activeTargetIndex];
 				ResetTargetApproach();
 				InputBuffer::SetLeftStickOverride(false);
+				const bool initializesHelper =
+					step.type == Targeting::TargetType::ShopTas
+					|| (IsMenuTasStep(step) && step.intermediate);
+				if(
+					initializesHelper
+					&& MenuHelper::IsPlaybackPendingOrActive()
+				)
+					return true;
 
 				if(step.type == Targeting::TargetType::ShopTas) {
 					MenuHelper::ArmShopPlayback(step.name);
