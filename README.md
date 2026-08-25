@@ -39,7 +39,7 @@ If using a Yuzu-based emulator, please install this mod at `0100E95004039001` in
 
 Xenomods patches version-specific game code. If an installed game update is v2.0.1+, the game will not load/crash entirely.
 
-An older `main` executable can be placed at `/atmosphere/contents/<title-id>/exefs/main`. This also restores the older executable's original bugs and limitations, so use one whenever possible. Ideally, v2.0.0 would be the best. (But I've been using v1.5.1 just fine!)
+An older `main` executable can be placed at `/atmosphere/contents/<title-id>/exefs/`. This also restores the older executable's original bugs and limitations, so keep that in mind. Ideally, v2.0.0 would be the best. (But I've been using v1.5.1 just fine!)
 
 ## Usage
 
