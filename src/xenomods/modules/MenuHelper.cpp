@@ -697,7 +697,7 @@ namespace xenomods {
 			const std::string contents = stream.str();
 			const std::string path = RecordingsPath();
 			if(!NnFile::Preallocate(path, contents.size())) {
-				g_Logger->LogError("Couldn't create Menu Helper file {}", path);
+				g_Logger->LogError("Couldn't create Menu Tool file {}", path);
 				return false;
 			}
 			NnFile file(path, nn::fs::OpenMode_Write);
@@ -851,7 +851,7 @@ namespace xenomods {
 	} // namespace
 
 	void MenuHelper::TopBarButton() {
-		if(ImGui::MenuItem("Menu Helper", nullptr, ShowWindow))
+		if(ImGui::MenuItem("Menu Tool", nullptr, ShowWindow))
 			ShowWindow = !ShowWindow;
 	}
 
@@ -1047,7 +1047,7 @@ namespace xenomods {
 			return;
 
 		ImGui::SetNextWindowSize(ImVec2(390.f, 330.f), ImGuiCond_Appearing);
-		if(!ImGui::Begin("Menu Helper", &ShowWindow)) {
+		if(!ImGui::Begin("Menu Tool", &ShowWindow)) {
 			ImGui::End();
 			return;
 		}
@@ -1214,11 +1214,11 @@ namespace xenomods {
 			| ImGuiWindowFlags_NoInputs
 			| ImGuiWindowFlags_NoNav
 			| ImGuiWindowFlags_NoFocusOnAppearing;
-		if(ImGui::Begin("Menu Helper Status", nullptr, flags)) {
+		if(ImGui::Begin("Menu Tool Status", nullptr, flags)) {
 			if(recording) {
 				ImGui::TextColored(
 					ImVec4(1.f, 0.25f, 0.2f, 1.f),
-					"MENU HELPER - RECORDING"
+					"MENU TOOL - RECORDING"
 				);
 				ImGui::Text("Captured inputs: %zu", draftActions.size());
 				if(InputBuffer::AcceptedActionCaptureWaitingForNeutral())
@@ -1226,7 +1226,7 @@ namespace xenomods {
 			} else if(playing) {
 				ImGui::TextColored(
 					ImVec4(0.3f, 1.f, 0.4f, 1.f),
-					"MENU HELPER - %s",
+					"MENU TOOL - %s",
 					state == HelperState::Playing ? "PLAYING" : "FINISHING"
 				);
 				ImGui::Text(
@@ -1237,10 +1237,10 @@ namespace xenomods {
 				ImGui::TextColored(
 					ImVec4(1.f, 0.8f, 0.2f, 1.f),
 					activeKind == RecordingKind::Shop
-						? "MENU HELPER - ARMED: ENTER SHOP"
+						? "MENU TOOL - ARMED: ENTER SHOP"
 						: activeKind == RecordingKind::Travel
-							? "MENU HELPER - ARMED: OPEN SKIP TRAVEL"
-							: "MENU HELPER - ARMED: OPEN MENU"
+							? "MENU TOOL - ARMED: OPEN SKIP TRAVEL"
+							: "MENU TOOL - ARMED: OPEN MENU"
 				);
 			}
 		}
@@ -1493,7 +1493,7 @@ namespace xenomods {
 		if(dataStoreSingletonAddress != skylaunch::hook::INVALID_FUNCTION_PTR)
 			dataStoreSingleton = reinterpret_cast<void**>(dataStoreSingletonAddress);
 		else
-			g_Logger->LogError("Menu Helper couldn't resolve the data-store singleton");
+			g_Logger->LogError("Menu Tool couldn't resolve the data-store singleton");
 		LoadRecordings();
 		InputBuffer::SetAcceptedActionCallback(&OnAcceptedAction);
 		InputBuffer::SetInputLayerUpdateCallback(&OnInputLayerUpdating);
@@ -1545,7 +1545,7 @@ namespace xenomods {
 		g_Menu->RegisterTopBarCallback(&TopBarButton);
 		g_Menu->RegisterRenderCallback(&MenuWindow, true);
 		g_Menu->RegisterRenderCallback(&StatusOverlay, false);
-		g_Logger->LogInfo("Menu Helper shop hooks installed");
+		g_Logger->LogInfo("Menu Tool shop hooks installed");
 #endif
 	}
 

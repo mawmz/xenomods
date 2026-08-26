@@ -7,13 +7,19 @@
 #include "ToolWindowLayout.hpp"
 
 #include <algorithm>
+#include <array>
+#include <cctype>
 #include <cmath>
+#include <cstring>
+#include <deque>
 #include <limits>
 #include <sstream>
 
 #include <fmt/format.h>
 #include <imgui.h>
 #include <misc/cpp/imgui_stdlib.h>
+#include <nn/fs.h>
+#include <nn/os.hpp>
 #include <toml++/toml.hpp>
 
 #include "xenomods/InputBuffer.hpp"
@@ -32,8 +38,6 @@ namespace xenomods {
 	bool Targeting::RouteActive = false;
 	bool Targeting::StartFromSelection = false;
 	bool Targeting::WarpToStart = false;
-	bool Targeting::UseArrivalRadius = false;
-	float Targeting::ArrivalRadius = 0.35f;
 
 	namespace {
 		int activeTargetIndex = -1;
@@ -41,15 +45,143 @@ namespace xenomods {
 		int startDelayFrames = 0;
 		int activeDelayIndex = -1;
 		int delayFramesRemaining = 0;
+		int activeActionIndex = -1;
+		int actionDelayFramesRemaining = 0;
+		int actionHoldFramesRemaining = 0;
+		bool actionHoldStarted = false;
+		std::deque<int> queuedActionIndices;
 		int trackedTargetIndex = -1;
 		glm::vec3 previousTargetDelta {};
 		bool hasPreviousTargetDelta = false;
 		bool targetingMenuTasPlayback = false;
+		std::string lastSavedTargets;
+		std::string currentRouteFile = "targets0.toml";
+		std::vector<std::string> routeFiles;
+		std::string routeFileError;
+		std::string lastSavedRouteSetting;
+		std::uint64_t lastBackupTick = 0;
+		constexpr std::uint64_t SystemTicksPerSecond = 19200000;
+		constexpr std::uint64_t BackupIntervalTicks =
+			SystemTicksPerSecond * 60 * 5;
+
+		struct ButtonChoice {
+			const char* name;
+			std::uint32_t mask;
+		};
+
+		constexpr std::array<ButtonChoice, 18> ButtonChoices {{
+			{"A", 1u << static_cast<unsigned>(nn::hid::NpadButton::A)},
+			{"B", 1u << static_cast<unsigned>(nn::hid::NpadButton::B)},
+			{"X", 1u << static_cast<unsigned>(nn::hid::NpadButton::X)},
+			{"Y", 1u << static_cast<unsigned>(nn::hid::NpadButton::Y)},
+			{"L", 1u << static_cast<unsigned>(nn::hid::NpadButton::L)},
+			{"R", 1u << static_cast<unsigned>(nn::hid::NpadButton::R)},
+			{"ZL", 1u << static_cast<unsigned>(nn::hid::NpadButton::ZL)},
+			{"ZR", 1u << static_cast<unsigned>(nn::hid::NpadButton::ZR)},
+			{"Plus", 1u << static_cast<unsigned>(nn::hid::NpadButton::Plus)},
+			{"Minus", 1u << static_cast<unsigned>(nn::hid::NpadButton::Minus)},
+			{"Stick L", 1u << static_cast<unsigned>(nn::hid::NpadButton::StickL)},
+			{"Stick R", 1u << static_cast<unsigned>(nn::hid::NpadButton::StickR)},
+			{"D-pad Up", 1u << static_cast<unsigned>(nn::hid::NpadButton::Up)},
+			{"D-pad Down", 1u << static_cast<unsigned>(nn::hid::NpadButton::Down)},
+			{"D-pad Left", 1u << static_cast<unsigned>(nn::hid::NpadButton::Left)},
+			{"D-pad Right", 1u << static_cast<unsigned>(nn::hid::NpadButton::Right)},
+			{"SL", (1u << static_cast<unsigned>(nn::hid::NpadButton::LeftSL))
+				| (1u << static_cast<unsigned>(nn::hid::NpadButton::RightSL))},
+			{"SR", (1u << static_cast<unsigned>(nn::hid::NpadButton::LeftSR))
+				| (1u << static_cast<unsigned>(nn::hid::NpadButton::RightSR))}
+		}};
+
+		std::string ActionName(std::uint32_t mask) {
+			std::string name;
+			for(const auto& choice : ButtonChoices) {
+				if((mask & choice.mask) == 0)
+					continue;
+				if(!name.empty())
+					name += " + ";
+				name += choice.name;
+			}
+			return name.empty() ? "<select input>" : name;
+		}
 
 		void ResetTargetApproach() {
 			trackedTargetIndex = -1;
 			previousTargetDelta = {};
 			hasPreviousTargetDelta = false;
+		}
+
+		void ClearActiveActions() {
+			activeActionIndex = -1;
+			actionDelayFramesRemaining = 0;
+			actionHoldFramesRemaining = 0;
+			actionHoldStarted = false;
+			queuedActionIndices.clear();
+			InputBuffer::SetRawButtonOverride(false);
+		}
+
+		void LoadAction(int index) {
+			activeActionIndex = index;
+			const auto& action = Targeting::Targets[index];
+			actionDelayFramesRemaining = std::max(0, action.delayFrames);
+			actionHoldFramesRemaining = std::max(1, action.holdFrames);
+			actionHoldStarted = false;
+		}
+
+		void QueueAction(int index) {
+			if(activeActionIndex < 0)
+				LoadAction(index);
+			else
+				queuedActionIndices.push_back(index);
+		}
+
+		void AdvanceActionQueue() {
+			InputBuffer::SetRawButtonOverride(false);
+			if(queuedActionIndices.empty()) {
+				activeActionIndex = -1;
+				actionDelayFramesRemaining = 0;
+				actionHoldFramesRemaining = 0;
+				actionHoldStarted = false;
+				return;
+			}
+			const int next = queuedActionIndices.front();
+			queuedActionIndices.pop_front();
+			LoadAction(next);
+		}
+
+		void UpdateActiveAction(bool controlFree) {
+			if(
+				activeActionIndex < 0
+				|| activeActionIndex >= static_cast<int>(Targeting::Targets.size())
+			) {
+				InputBuffer::SetRawButtonOverride(false);
+				return;
+			}
+
+			if(actionHoldStarted && actionHoldFramesRemaining <= 0)
+				AdvanceActionQueue();
+			if(activeActionIndex < 0)
+				return;
+
+			const auto& action = Targeting::Targets[activeActionIndex];
+			if(!actionHoldStarted) {
+				InputBuffer::SetRawButtonOverride(false);
+				if(!controlFree)
+					return;
+				if(actionDelayFramesRemaining > 0) {
+					actionDelayFramesRemaining--;
+					return;
+				}
+				actionHoldStarted = true;
+			}
+
+			const bool firstFrame =
+				actionHoldFramesRemaining == std::max(1, action.holdFrames);
+			InputBuffer::SetRawButtonOverride(
+				true,
+				action.buttonMask,
+				firstFrame
+			);
+			actionHoldFramesRemaining--;
 		}
 
 		bool IsMenuTasStep(const Targeting::TargetData& target) {
@@ -99,11 +231,261 @@ namespace xenomods {
 			return changed;
 		}
 
-		std::string TargetsPath() {
+		bool WriteTargetsFile(const std::string& path, const std::string& contents);
+
+		std::string LegacyTargetsPath() {
 			return fmt::format(
 				XENOMODS_CONFIG_PATH "/{}/targets.toml",
 				XENOMODS_CODENAME_STR
 			);
+		}
+
+		std::string TargetsDirectory() {
+			return fmt::format(
+				XENOMODS_CONFIG_PATH "/{}/Targets",
+				XENOMODS_CODENAME_STR
+			);
+		}
+
+		std::string TargetsPath() {
+			return fmt::format("{}/{}", TargetsDirectory(), currentRouteFile);
+		}
+
+		std::string TargetsBackupPath() {
+			std::string stem = currentRouteFile;
+			if(stem.size() >= 5 && stem.ends_with(".toml"))
+				stem.resize(stem.size() - 5);
+			return fmt::format("{}/{}.backup.toml", TargetsDirectory(), stem);
+		}
+
+		std::string TargetingSettingsPath() {
+			return fmt::format(
+				XENOMODS_CONFIG_PATH "/{}/targetingSettings.toml",
+				XENOMODS_CODENAME_STR
+			);
+		}
+
+		bool FileExists(const std::string& path) {
+			nn::fs::DirectoryEntryType type {};
+			return R_SUCCEEDED(nn::fs::GetEntryType(&type, path.c_str()))
+				&& type == nn::fs::DirectoryEntryType_File;
+		}
+
+		bool IsRouteFile(const char* name) {
+			if(name == nullptr)
+				return false;
+			const std::string value(name);
+			return value.size() > 5
+				&& value.ends_with(".toml")
+				&& !value.ends_with(".backup.toml");
+		}
+
+		void RescanRouteFiles() {
+			routeFiles.clear();
+			nn::fs::DirectoryHandle directory {};
+			if(R_FAILED(nn::fs::OpenDirectory(
+				&directory,
+				TargetsDirectory().c_str(),
+				nn::fs::OpenDirectoryMode_File
+			)))
+				return;
+			s64 count = 0;
+			if(R_FAILED(nn::fs::GetDirectoryEntryCount(&count, directory))) {
+				nn::fs::CloseDirectory(directory);
+				return;
+			}
+			std::vector<nn::fs::DirectoryEntry> entries(
+				static_cast<std::size_t>(std::max<s64>(count, 0))
+			);
+			s64 read = 0;
+			if(count > 0)
+				nn::fs::ReadDirectory(&read, entries.data(), directory, count);
+			nn::fs::CloseDirectory(directory);
+			for(s64 index = 0; index < read; index++) {
+				if(IsRouteFile(entries[index].name))
+					routeFiles.emplace_back(entries[index].name);
+			}
+			std::sort(routeFiles.begin(), routeFiles.end());
+		}
+
+		void SaveRouteSettingIfChanged() {
+			if(currentRouteFile == lastSavedRouteSetting)
+				return;
+			toml::table root;
+			root.emplace("active_route", currentRouteFile);
+			std::stringstream stream;
+			stream << root;
+			if(WriteTargetsFile(TargetingSettingsPath(), stream.str()))
+				lastSavedRouteSetting = currentRouteFile;
+		}
+
+		std::string SerializeTargets() {
+			toml::array allTargets;
+			for(const auto& target : Targeting::Targets) {
+				toml::table entry;
+				const char* type = "position";
+				if(target.type == Targeting::TargetType::Delay)
+					type = "delay";
+				else if(target.type == Targeting::TargetType::Action)
+					type = "action";
+				else if(target.type == Targeting::TargetType::ShopTas)
+					type = "shop_tas";
+				else if(target.type == Targeting::TargetType::MenuTas)
+					type = "menu_tas";
+				else if(target.type == Targeting::TargetType::TravelTas)
+					type = "travel_tas";
+				entry.emplace("type", type);
+				entry.emplace("mapId", target.mapId);
+				entry.emplace("mapNameReadOnly", target.mapName);
+				if(target.type == Targeting::TargetType::Delay) {
+					entry.emplace("frames", std::max(0, target.delayFrames));
+				} else if(target.type == Targeting::TargetType::Action) {
+					toml::array buttons;
+					for(const auto& choice : ButtonChoices) {
+						if((target.buttonMask & choice.mask) != 0)
+							buttons.emplace_back(choice.name);
+					}
+					entry.emplace("buttons", std::move(buttons));
+					entry.emplace("delay_frames", std::max(0, target.delayFrames));
+					entry.emplace("hold_frames", std::max(1, target.holdFrames));
+				} else if(target.type == Targeting::TargetType::Position) {
+					entry.emplace("name", target.name);
+					entry.emplace(
+						"position",
+						toml::array {
+							target.position.x,
+							target.position.y,
+							target.position.z
+						}
+					);
+				} else {
+					entry.emplace("recording", target.name);
+					if(
+						target.type == Targeting::TargetType::MenuTas
+						|| target.type == Targeting::TargetType::TravelTas
+					) {
+						entry.emplace("intermediate", target.intermediate);
+						entry.emplace(
+							"position",
+							toml::array {
+								target.position.x,
+								target.position.y,
+								target.position.z
+							}
+						);
+					}
+				}
+				allTargets.emplace_back(std::move(entry));
+			}
+
+			toml::table root;
+			root.emplace("targets", std::move(allTargets));
+			std::stringstream stream;
+			stream << root;
+			return stream.str();
+		}
+
+		bool WriteTargetsFile(const std::string& path, const std::string& contents) {
+			if(!NnFile::Preallocate(path, contents.size())) {
+				g_Logger->LogError("Couldn't create targets file {}", path);
+				return false;
+			}
+			NnFile file(path, nn::fs::OpenMode_Write);
+			if(!file.Ok()) {
+				g_Logger->LogError("Couldn't open targets file {}", path);
+				return false;
+			}
+			file.Write(contents.c_str(), contents.size());
+			file.Flush();
+			return true;
+		}
+
+		void SaveTargetsIfChanged() {
+			const std::string contents = SerializeTargets();
+			if(contents == lastSavedTargets)
+				return;
+			if(WriteTargetsFile(TargetsPath(), contents))
+				lastSavedTargets = contents;
+		}
+
+		void UpdateTargetsBackup() {
+			const std::uint64_t now = nn::os::GetSystemTick();
+			if(lastBackupTick == 0) {
+				lastBackupTick = now;
+				return;
+			}
+			if(now - lastBackupTick < BackupIntervalTicks)
+				return;
+			lastBackupTick = now;
+			WriteTargetsFile(TargetsBackupPath(), SerializeTargets());
+		}
+
+		bool CopyFileUnchanged(const std::string& source, const std::string& destination) {
+			NnFile input(source, nn::fs::OpenMode_Read);
+			if(!input.Ok() || input.Size() < 0)
+				return false;
+			std::string contents(static_cast<std::size_t>(input.Size()), '\0');
+			if(!contents.empty() && !input.Read(contents.data(), input.Size()))
+				return false;
+			return WriteTargetsFile(destination, contents);
+		}
+
+		int RouteFileNumber(const std::string& name) {
+			if(!name.starts_with("targets") || !name.ends_with(".toml"))
+				return -1;
+			const auto number = name.substr(7, name.size() - 12);
+			if(number.empty())
+				return -1;
+			int result = 0;
+			for(const char character : number) {
+				if(!std::isdigit(static_cast<unsigned char>(character)))
+					return -1;
+				result = result * 10 + (character - '0');
+			}
+			return result;
+		}
+
+		void CreateNewRoute() {
+			int maximum = -1;
+			for(const auto& file : routeFiles)
+				maximum = std::max(maximum, RouteFileNumber(file));
+			currentRouteFile = fmt::format("targets{}.toml", maximum + 1);
+			Targeting::StopRoute();
+			Targeting::Targets.clear();
+			lastSavedTargets.clear();
+			Targeting::SaveTargetsToFile();
+			RescanRouteFiles();
+			SaveRouteSettingIfChanged();
+			routeFileError.clear();
+		}
+
+		void InitializeRouteFiles() {
+			const toml::parse_result settings = toml::parse_file(TargetingSettingsPath());
+			if(settings)
+				currentRouteFile = settings["active_route"].value_or<std::string>(
+					"targets0.toml"
+				);
+
+			RescanRouteFiles();
+			if(routeFiles.empty()) {
+				currentRouteFile = "targets0.toml";
+				if(FileExists(LegacyTargetsPath())) {
+					if(!CopyFileUnchanged(LegacyTargetsPath(), TargetsPath()))
+						g_Logger->LogError("Couldn't migrate legacy targets.toml");
+				} else {
+					Targeting::Targets.clear();
+					lastSavedTargets.clear();
+					Targeting::SaveTargetsToFile();
+				}
+				RescanRouteFiles();
+			}
+			if(
+				std::find(routeFiles.begin(), routeFiles.end(), currentRouteFile)
+					== routeFiles.end()
+			)
+				currentRouteFile = routeFiles.empty() ? "targets0.toml" : routeFiles.front();
+			lastSavedRouteSetting.clear();
+			SaveRouteSettingIfChanged();
 		}
 
 		unsigned short CurrentMapId() {
@@ -170,6 +552,7 @@ namespace xenomods {
 			startDelayFrames = 0;
 			activeDelayIndex = -1;
 			delayFramesRemaining = 0;
+			ClearActiveActions();
 			ResetTargetApproach();
 			InputBuffer::SetLeftStickOverride(false);
 			if(!Targeting::RouteActive) {
@@ -270,6 +653,19 @@ namespace xenomods {
 						return true;
 					continue;
 				}
+				if(Targeting::Targets[activeTargetIndex].type == Targeting::TargetType::Action) {
+					QueueAction(activeTargetIndex);
+					activeTargetIndex = FindNextTargetForMap(activeTargetIndex, mapId);
+					if(activeTargetIndex < 0) {
+						Targeting::RouteActive = false;
+						waitingForPlayer = false;
+						ResetTargetApproach();
+						InputBuffer::SetLeftStickOverride(false);
+						g_Logger->ToastInfo("targeting", "Target route complete");
+						return true;
+					}
+					continue;
+				}
 
 				const auto& step = Targeting::Targets[activeTargetIndex];
 				ResetTargetApproach();
@@ -318,6 +714,7 @@ namespace xenomods {
 		startDelayFrames = 0;
 		activeDelayIndex = -1;
 		delayFramesRemaining = 0;
+		ClearActiveActions();
 		ResetTargetApproach();
 		targetingMenuTasPlayback = false;
 		InputBuffer::SetLeftStickOverride(false);
@@ -326,7 +723,11 @@ namespace xenomods {
 	void Targeting::LoadTargetsFromFile() {
 		toml::parse_result result = toml::parse_file(TargetsPath());
 		if(!result) {
-			g_Logger->LogDebug("Target file not loaded: {}", std::move(result).error().description());
+			routeFileError = fmt::format(
+				"Reload failed: {}",
+				std::move(result).error().description()
+			);
+			g_Logger->ToastWarning("targeting", "{}", routeFileError);
 			return;
 		}
 
@@ -353,6 +754,8 @@ namespace xenomods {
 			const auto type = (*entry)["type"].value_or<std::string>("position");
 			target.type = type == "delay"
 				? TargetType::Delay
+				: type == "action"
+					? TargetType::Action
 				: type == "shop_tas"
 					? TargetType::ShopTas
 					: type == "menu_tas"
@@ -371,6 +774,29 @@ namespace xenomods {
 				target.delayFrames = static_cast<int>(std::clamp<std::int64_t>(
 					frames,
 					0,
+					std::numeric_limits<int>::max()
+				));
+			} else if(target.type == TargetType::Action) {
+				target.buttonMask = 0;
+				if(const auto buttons = entry->get_as<toml::array>("buttons")) {
+					for(const auto& button : *buttons) {
+						const auto name = button.value<std::string>();
+						if(!name)
+							continue;
+						for(const auto& choice : ButtonChoices) {
+							if(*name == choice.name)
+								target.buttonMask |= choice.mask;
+						}
+					}
+				}
+				target.delayFrames = static_cast<int>(std::clamp<std::int64_t>(
+					(*entry)["delay_frames"].value_or<std::int64_t>(0),
+					0,
+					std::numeric_limits<int>::max()
+				));
+				target.holdFrames = static_cast<int>(std::clamp<std::int64_t>(
+					(*entry)["hold_frames"].value_or<std::int64_t>(1),
+					1,
 					std::numeric_limits<int>::max()
 				));
 			} else if(target.type == TargetType::Position) {
@@ -406,66 +832,16 @@ namespace xenomods {
 
 		StopRoute();
 		Targets.swap(loadedTargets);
+		lastSavedTargets = SerializeTargets();
+		routeFileError.clear();
+		SaveRouteSettingIfChanged();
 		g_Logger->ToastInfo("targeting", "Loaded {} target(s)", Targets.size());
 	}
 
 	void Targeting::SaveTargetsToFile() {
-		toml::array allTargets;
-		for(const auto& target : Targets) {
-			toml::table entry;
-			const char* type = "position";
-			if(target.type == TargetType::Delay)
-				type = "delay";
-			else if(target.type == TargetType::ShopTas)
-				type = "shop_tas";
-			else if(target.type == TargetType::MenuTas)
-				type = "menu_tas";
-			else if(target.type == TargetType::TravelTas)
-				type = "travel_tas";
-			entry.emplace("type", type);
-			entry.emplace("mapId", target.mapId);
-			entry.emplace("mapNameReadOnly", target.mapName);
-			if(target.type == TargetType::Delay) {
-				entry.emplace("frames", std::max(0, target.delayFrames));
-			} else if(target.type == TargetType::Position) {
-				entry.emplace("name", target.name);
-				entry.emplace(
-					"position",
-					toml::array {target.position.x, target.position.y, target.position.z}
-				);
-			} else {
-				entry.emplace("recording", target.name);
-				if(
-					target.type == TargetType::MenuTas
-					|| target.type == TargetType::TravelTas
-				) {
-					entry.emplace("intermediate", target.intermediate);
-					entry.emplace(
-						"position",
-						toml::array {
-							target.position.x,
-							target.position.y,
-							target.position.z
-						}
-					);
-				}
-			}
-			allTargets.emplace_back(std::move(entry));
-		}
-
-		toml::table root;
-		root.emplace("targets", std::move(allTargets));
-		std::stringstream stream;
-		stream << root;
-		const std::string contents = stream.str();
-		const auto path = TargetsPath();
-		if(!NnFile::Preallocate(path, contents.size())) {
-			g_Logger->LogError("Couldn't create targets file {}", path);
-			return;
-		}
-		NnFile file(path, nn::fs::OpenMode_Write);
-		file.Write(contents.c_str(), contents.size());
-		file.Flush();
+		const std::string contents = SerializeTargets();
+		if(WriteTargetsFile(TargetsPath(), contents))
+			lastSavedTargets = contents;
 	}
 
 	Targeting::TargetData* Targeting::NewTarget() {
@@ -514,6 +890,38 @@ namespace xenomods {
 			}
 		}
 		Targets.insert(Targets.begin() + insertionIndex, std::move(delay));
+		StopRoute();
+		return insertionIndex;
+	}
+
+	int Targeting::NewAction(int insertAfter) {
+		const auto mapId = CurrentMapId();
+		const auto mapName = detail::IsModuleRegistered(STRINGIFY(DebugStuff))
+			? DebugStuff::GetMapName(mapId)
+			: "Unknown";
+		TargetData action {
+			.type = TargetType::Action,
+			.mapName = mapName,
+			.mapId = mapId,
+			.delayFrames = 0,
+			.buttonMask = 1u << static_cast<unsigned>(nn::hid::NpadButton::A),
+			.holdFrames = 1
+		};
+
+		int insertionIndex = static_cast<int>(Targets.size());
+		if(
+			insertAfter >= 0
+			&& insertAfter < static_cast<int>(Targets.size())
+			&& Targets[insertAfter].mapId == mapId
+		) {
+			insertionIndex = insertAfter + 1;
+		} else {
+			for(int index = 0; index < static_cast<int>(Targets.size()); index++) {
+				if(Targets[index].mapId == mapId)
+					insertionIndex = index + 1;
+			}
+		}
+		Targets.insert(Targets.begin() + insertionIndex, std::move(action));
 		StopRoute();
 		return insertionIndex;
 	}
@@ -610,19 +1018,39 @@ namespace xenomods {
 		}
 
 		static int selectedIndex = -1;
-		if(ImGui::Button("Load")) {
+		const float reloadWidth = ImGui::CalcTextSize("Reload").x
+			+ ImGui::GetStyle().FramePadding.x * 2.f;
+		const float newWidth = ImGui::CalcTextSize("+ New").x
+			+ ImGui::GetStyle().FramePadding.x * 2.f;
+		ImGui::SetNextItemWidth(std::max(
+			100.f,
+			ImGui::GetContentRegionAvail().x - reloadWidth - newWidth
+				- ImGui::GetStyle().ItemSpacing.x * 2.f
+		));
+		if(ImGui::BeginCombo("##RouteFile", currentRouteFile.c_str())) {
+			for(const auto& routeFile : routeFiles) {
+				if(ImGui::Selectable(routeFile.c_str(), routeFile == currentRouteFile)) {
+					SaveTargetsIfChanged();
+					currentRouteFile = routeFile;
+					LoadTargetsFromFile();
+					selectedIndex = Targets.empty() ? -1 : 0;
+				}
+			}
+			ImGui::EndCombo();
+		}
+		ImGui::SameLine();
+		if(ImGui::Button("Reload")) {
+			RescanRouteFiles();
 			LoadTargetsFromFile();
 			selectedIndex = Targets.empty() ? -1 : 0;
 		}
 		ImGui::SameLine();
-		if(ImGui::Button("Save"))
-			SaveTargetsToFile();
-		ImGui::SameLine();
 		if(ImGui::Button("+ New")) {
-			NewTarget();
-			selectedIndex = static_cast<int>(Targets.size()) - 1;
+			SaveTargetsIfChanged();
+			CreateNewRoute();
+			selectedIndex = -1;
 		}
-		ImGui::SameLine();
+
 		if(RouteActive) {
 			if(ImGui::Button("Stop"))
 				StopRoute();
@@ -636,26 +1064,20 @@ namespace xenomods {
 		ImGui::Checkbox("Show all", &ShowAllTargets);
 		ImGui::SameLine();
 		ImGui::Checkbox("Show on map", &ShowTargetsOnMap);
-		ImGui::Checkbox("Use arrival radius", &UseArrivalRadius);
-		if(UseArrivalRadius) {
-			ImGui::PushItemWidth(90.f);
-			ImGui::DragFloat(
-				"Arrival radius",
-				&ArrivalRadius,
-				0.05f,
-				0.05f,
-				10.f,
-				"%.2f"
-			);
-			ImGui::PopItemWidth();
-		}
 
-		static TargetType addType = TargetType::Delay;
+		if(!routeFileError.empty())
+			ImGui::TextColored(ImVec4(1.f, 0.35f, 0.3f, 1.f), "%s", routeFileError.c_str());
+
+		static TargetType addType = TargetType::Action;
 		static bool addIntermediate = false;
 		const bool canBeIntermediate =
 			addType == TargetType::MenuTas || addType == TargetType::TravelTas;
-		const char* addTypeName = addType == TargetType::Delay
-			? "Delay"
+		const char* addTypeName = addType == TargetType::Position
+			? "Target"
+			: addType == TargetType::Delay
+				? "Delay"
+			: addType == TargetType::Action
+				? "Action"
 			: addType == TargetType::ShopTas
 				? "ShopTAS"
 				: addType == TargetType::MenuTas ? "MenuTAS" : "TravelTAS";
@@ -672,13 +1094,19 @@ namespace xenomods {
 			ImGui::SetNextItemWidth(120.f);
 			if(ImGui::BeginCombo("##RouteStepType", addTypeName)) {
 				for(const auto type : {
+					TargetType::Position,
 					TargetType::Delay,
+					TargetType::Action,
 					TargetType::ShopTas,
 					TargetType::MenuTas,
 					TargetType::TravelTas
 				}) {
-					const char* name = type == TargetType::Delay
-						? "Delay"
+					const char* name = type == TargetType::Position
+						? "Target"
+						: type == TargetType::Delay
+							? "Delay"
+						: type == TargetType::Action
+							? "Action"
 						: type == TargetType::ShopTas
 							? "ShopTAS"
 							: type == TargetType::MenuTas ? "MenuTAS" : "TravelTAS";
@@ -689,13 +1117,20 @@ namespace xenomods {
 			}
 			ImGui::SameLine();
 			if(ImGui::Button("Add")) {
-				selectedIndex = addType == TargetType::Delay
-					? NewDelay(selectedIndex)
-					: NewSpecialStep(
+				if(addType == TargetType::Position) {
+					NewTarget();
+					selectedIndex = static_cast<int>(Targets.size()) - 1;
+				} else if(addType == TargetType::Delay) {
+					selectedIndex = NewDelay(selectedIndex);
+				} else if(addType == TargetType::Action) {
+					selectedIndex = NewAction(selectedIndex);
+				} else {
+					selectedIndex = NewSpecialStep(
 						addType,
 						selectedIndex,
 						canBeIntermediate && addIntermediate
 					);
+				}
 			}
 			if(canBeIntermediate)
 				ImGui::Checkbox("Intermediate", &addIntermediate);
@@ -708,6 +1143,12 @@ namespace xenomods {
 				ImGui::Text("Starting in %d frame(s)", startDelayFrames);
 			else if(activeDelayIndex == activeTargetIndex)
 				ImGui::Text("Delay: %df", delayFramesRemaining);
+			else if(activeActionIndex == activeTargetIndex) {
+				if(actionHoldStarted)
+					ImGui::Text("Action: %s", ActionName(Targets[activeTargetIndex].buttonMask).c_str());
+				else
+					ImGui::Text("Action delay: %df", actionDelayFramesRemaining);
+			}
 			else if(
 				activeTargetIndex >= 0
 				&& activeTargetIndex < static_cast<int>(Targets.size())
@@ -756,9 +1197,11 @@ namespace xenomods {
 			selectedIndex >= 0 && selectedIndex < static_cast<int>(Targets.size());
 		const bool selectedMenuTas = hasSelection
 			&& IsMenuTasStep(Targets[selectedIndex]);
+		const bool selectedAction = hasSelection
+			&& Targets[selectedIndex].type == TargetType::Action;
 		const float editorReserve = hasSelection
 			? ImGui::GetTextLineHeightWithSpacing()
-				* (selectedMenuTas ? 5.5f : 4.5f)
+				* (selectedMenuTas ? 5.5f : selectedAction ? 4.5f : 4.5f)
 				+ ImGui::GetFrameHeightWithSpacing()
 			: 0.f;
 		const float listHeight = std::max(
@@ -773,6 +1216,12 @@ namespace xenomods {
 					label = fmt::format(
 						"Delay: {}f{}",
 						std::max(0, Targets[index].delayFrames),
+						index == activeTargetIndex ? "  [ACTIVE]" : ""
+					);
+				} else if(Targets[index].type == TargetType::Action) {
+					label = fmt::format(
+						"Action: {}{}",
+						ActionName(Targets[index].buttonMask),
 						index == activeTargetIndex ? "  [ACTIVE]" : ""
 					);
 				} else if(Targets[index].type == TargetType::ShopTas) {
@@ -824,6 +1273,53 @@ namespace xenomods {
 				))
 					target.delayFrames = std::max(0, target.delayFrames);
 				ImGui::TextDisabled("Delay: %df", std::max(0, target.delayFrames));
+			} else if(target.type == TargetType::Action) {
+				ImGui::TextUnformatted("Input:");
+				ImGui::SameLine();
+				const std::string preview = ActionName(target.buttonMask);
+				ImGui::SetNextItemWidth(-1.f);
+				if(ImGui::BeginCombo("##ActionButtons", preview.c_str())) {
+					for(const auto& choice : ButtonChoices) {
+						const bool selected = (target.buttonMask & choice.mask) != 0;
+						if(ImGui::Selectable(
+							choice.name,
+							selected,
+							ImGuiSelectableFlags_DontClosePopups
+						)) {
+							if(selected)
+								target.buttonMask &= ~choice.mask;
+							else
+								target.buttonMask |= choice.mask;
+						}
+					}
+					ImGui::EndCombo();
+				}
+				const float valueWidth = 72.f;
+				ImGui::TextUnformatted("Delay:");
+				ImGui::SameLine();
+				ImGui::SetNextItemWidth(valueWidth);
+				if(ImGui::DragInt(
+					"##ActionDelay",
+					&target.delayFrames,
+					1.f,
+					0,
+					std::numeric_limits<int>::max(),
+					"%df"
+				))
+					target.delayFrames = std::max(0, target.delayFrames);
+				ImGui::SameLine();
+				ImGui::TextUnformatted("Hold for:");
+				ImGui::SameLine();
+				ImGui::SetNextItemWidth(valueWidth);
+				if(ImGui::DragInt(
+					"##ActionHold",
+					&target.holdFrames,
+					1.f,
+					1,
+					std::numeric_limits<int>::max(),
+					"%df"
+				))
+					target.holdFrames = std::max(1, target.holdFrames);
 			} else if(target.type == TargetType::Position) {
 				ImGui::InputText("Name", &target.name);
 				ImGui::TextUnformatted("Position");
@@ -914,16 +1410,25 @@ namespace xenomods {
 			}
 		}
 
+		SaveTargetsIfChanged();
+
 		ImGui::End();
 	}
 
 	void Targeting::Initialize() {
 		UpdatableModule::Initialize();
+		InitializeRouteFiles();
 		LoadTargetsFromFile();
+		// A missing or malformed file must not be replaced until the user actually
+		// changes the in-memory route.
+		lastSavedTargets = SerializeTargets();
+		lastBackupTick = nn::os::GetSystemTick();
 		g_Menu->RegisterRenderCallback(&MenuWindow, true);
 	}
 
 	void Targeting::Update(fw::UpdateInfo*) {
+		SaveTargetsIfChanged();
+		UpdateTargetsBackup();
 		if(
 			ShowTargetsOnMap
 			&& detail::IsModuleRegistered(STRINGIFY(DebugStuff))
@@ -970,6 +1475,10 @@ namespace xenomods {
 				}
 			}
 		}
+		const bool actionControlFree = PlayerMovement::GetPartyPosition() != nullptr
+			&& CameraTools::HasCameraState
+			&& gf::GfGameManager::isControlFree();
+		UpdateActiveAction(actionControlFree);
 		if(
 			targetingMenuTasPlayback
 			&& MenuHelper::IsMenuPlaybackPendingOrActive()
@@ -1003,7 +1512,6 @@ namespace xenomods {
 			ConsumeActiveSpecialSteps(mapId);
 			return;
 		}
-
 		const auto playerPosition = PlayerMovement::GetPartyPosition();
 		if(playerPosition == nullptr || !CameraTools::HasCameraState) {
 			waitingForPlayer = true;
@@ -1044,11 +1552,9 @@ namespace xenomods {
 		glm::vec3 delta = Targets[movementTargetIndex].position - *playerPosition;
 		delta.y = 0.f;
 		float distance = glm::length(delta);
-		const float completionDistance =
-			UseArrivalRadius ? std::max(ArrivalRadius, 0.05f) : 0.005f;
+		constexpr float completionDistance = 0.005f;
 		bool crossedExactTarget =
-			!UseArrivalRadius
-			&& hasPreviousTargetDelta
+			hasPreviousTargetDelta
 			&& trackedTargetIndex == movementTargetIndex
 			&& glm::dot(previousTargetDelta, delta) <= 0.f;
 		while(distance <= completionDistance || crossedExactTarget) {

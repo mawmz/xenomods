@@ -46,6 +46,14 @@ namespace xenomods::InputBuffer {
 	void Clear();
 	std::uint32_t PendingButtons();
 	void SetLeftStickOverride(bool active, float x = 0.f, float y = 0.f);
+	// Field-route actions use a raw pad override rather than menu playback.
+	// The mask is merged with P1's physical input; down is asserted for the
+	// action's first frame only.
+	void SetRawButtonOverride(
+		bool active,
+		std::uint32_t heldMask = 0,
+		bool down = false
+	);
 	void SetAcceptedActionCallback(AcceptedActionCallback callback);
 	void SetInputLayerUpdateCallback(InputLayerUpdateCallback callback);
 	void SetAcceptedActionCapture(bool active);

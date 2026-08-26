@@ -265,6 +265,9 @@ namespace xenomods::InputBuffer {
 		bool leftStickOverrideActive = false;
 		float leftStickOverrideX = 0.f;
 		float leftStickOverrideY = 0.f;
+		bool rawButtonOverrideActive = false;
+		std::uint32_t rawButtonHeld = 0;
+		std::uint32_t rawButtonDown = 0;
 		constexpr float StickThreshold = 0.05f;
 
 		std::uint32_t GetPendingMask() {
@@ -330,6 +333,8 @@ namespace xenomods::InputBuffer {
 					physicalHeld = original;
 				if(pad == 0 && playbackOverrideActive)
 					return PlaybackButtonMask();
+				if(pad == 0 && rawButtonOverrideActive)
+					return original | rawButtonHeld;
 				return original;
 			}
 		};
@@ -339,6 +344,8 @@ namespace xenomods::InputBuffer {
 				const std::uint32_t original = Orig(pad);
 				if(pad == 0 && playbackOverrideActive)
 					return PlaybackButtonMask();
+				if(pad == 0 && rawButtonOverrideActive)
+					return original | rawButtonDown;
 				if(!Enabled || pad != 0) {
 					if(pad == 0)
 						Clear();
@@ -362,7 +369,11 @@ namespace xenomods::InputBuffer {
 		struct GetUpHook : skylaunch::hook::Trampoline<GetUpHook> {
 			static std::uint32_t Hook(int pad) {
 				const std::uint32_t original = Orig(pad);
-				return pad == 0 && playbackOverrideActive ? 0 : original;
+				if(pad == 0 && playbackOverrideActive)
+					return 0;
+				return pad == 0 && rawButtonOverrideActive
+					? original & ~rawButtonHeld
+					: original;
 			}
 		};
 
@@ -673,6 +684,12 @@ namespace xenomods::InputBuffer {
 		leftStickOverrideActive = active;
 		leftStickOverrideX = active ? std::clamp(x, -1.f, 1.f) : 0.f;
 		leftStickOverrideY = active ? std::clamp(y, -1.f, 1.f) : 0.f;
+	}
+
+	void SetRawButtonOverride(bool active, std::uint32_t heldMask, bool down) {
+		rawButtonOverrideActive = active && heldMask != 0;
+		rawButtonHeld = rawButtonOverrideActive ? heldMask : 0;
+		rawButtonDown = rawButtonOverrideActive && down ? heldMask : 0;
 	}
 
 	void SetAcceptedActionCallback(AcceptedActionCallback callback) {

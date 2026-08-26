@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -12,6 +13,7 @@ namespace xenomods {
 		enum class TargetType {
 			Position,
 			Delay,
+			Action,
 			ShopTas,
 			MenuTas,
 			TravelTas
@@ -24,6 +26,8 @@ namespace xenomods {
 			unsigned short mapId {};
 			glm::vec3 position {};
 			int delayFrames = 60;
+			std::uint32_t buttonMask = 0;
+			int holdFrames = 1;
 			bool intermediate = false;
 		};
 
@@ -34,14 +38,13 @@ namespace xenomods {
 		static bool RouteActive;
 		static bool StartFromSelection;
 		static bool WarpToStart;
-		static bool UseArrivalRadius;
-		static float ArrivalRadius;
 
 		static void MenuWindow();
 		static void LoadTargetsFromFile();
 		static void SaveTargetsToFile();
 		static TargetData* NewTarget();
 		static int NewDelay(int insertAfter = -1);
+		static int NewAction(int insertAfter = -1);
 		static int NewSpecialStep(
 			TargetType type,
 			int insertAfter = -1,
