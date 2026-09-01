@@ -792,7 +792,6 @@ namespace xenomods {
 
 		toolwindow::SetStackedPosition(toolwindow::StackSlot::Telemetry);
 		toolwindow::SetCompactWidth();
-		ImGui::SetNextWindowBgAlpha(0.65f);
 		const ImGuiWindowFlags flags =
 			ImGuiWindowFlags_AlwaysAutoResize
 				| ImGuiWindowFlags_NoFocusOnAppearing;
@@ -909,11 +908,6 @@ namespace xenomods {
 #endif
 
 #if !XENOMODS_CODENAME(bf3) // need to find these for 3
-		auto state = g_Menu->FindSection("state");
-		if(state != nullptr) {
-			state->RegisterRenderCallback(&MenuState);
-		}
-
 		g_Menu->RegisterRenderCallback(&PlayerTelemetryOverlay, true);
 		g_Menu->RegisterRenderCallback(&MenuWarps, true);
 #endif

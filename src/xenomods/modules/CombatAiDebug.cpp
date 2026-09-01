@@ -691,7 +691,8 @@ namespace xenomods {
 		TraceScriptArts::HookAt("_ZN3btl7Utility18AI_StartActionArtsEPN2gf13GF_OBJ_HANDLEEii");
 		TraceScriptArtsById::HookAt("_ZN3btl7Utility22AI_StartActionArtsByIDEPN2gf13GF_OBJ_HANDLEEii");
 
-		g_Menu->RegisterTopBarCallback(&TopBarButton);
+		if(auto misc = g_Menu->FindSection("misc"); misc != nullptr)
+			misc->RegisterRenderCallback(&TopBarButton);
 		g_Menu->RegisterRenderCallback(&Overlay, true);
 		g_Menu->RegisterRenderCallback(&FrameCounterOverlay, true);
 #endif

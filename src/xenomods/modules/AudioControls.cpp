@@ -4,18 +4,66 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <sstream>
 
+#include <fmt/format.h>
 #include <imgui.h>
 #include <skylaunch/hookng/Hooks.hpp>
+#include <toml++/toml.hpp>
 
 #include <xenomods/Logger.hpp>
+#include <xenomods/NnFile.hpp>
+#include <xenomods/engine/gf/MenuObject.hpp>
 
 namespace xenomods {
 
 	bool AudioControls::BackgroundMusic = true;
+	bool AudioControls::DisableErrorSound = false;
 
 #if XENOMODS_CODENAME(bf2)
 	namespace {
+		bool LastSavedDisableErrorSound = false;
+
+		std::string PlaybackSettingsPath() {
+			return fmt::format(
+				XENOMODS_CONFIG_PATH "/{}/tasSettings.toml",
+				XENOMODS_CODENAME_STR
+			);
+		}
+
+		void SavePlaybackSettingsIfChanged() {
+			if(AudioControls::DisableErrorSound == LastSavedDisableErrorSound)
+				return;
+			const auto path = PlaybackSettingsPath();
+			toml::table root;
+			toml::parse_result existing = toml::parse_file(path);
+			if(existing)
+				root = std::move(existing).table();
+			toml::table settings;
+			settings.insert_or_assign("enabled", AudioControls::DisableErrorSound);
+			root.insert_or_assign("disable_error_sound", std::move(settings));
+			std::stringstream stream;
+			stream << root;
+			const std::string contents = stream.str();
+			if(NnFile::Preallocate(path, contents.size())) {
+				NnFile file(path, nn::fs::OpenMode_Write);
+				file.Write(contents.c_str(), contents.size());
+				file.Flush();
+				LastSavedDisableErrorSound = AudioControls::DisableErrorSound;
+			}
+		}
+
+		struct MenuErrorSoundHook : skylaunch::hook::Trampoline<MenuErrorSoundHook> {
+			static void Hook(unsigned int index) {
+				if(
+					AudioControls::DisableErrorSound
+					&& index == gf::GfMenuObjUtil::SEIndex::error
+				)
+					return;
+				Orig(index);
+			}
+		};
+
 		using SetVolumeFn = void (*)(void* masterVolume, float volume);
 
 		constexpr const char* GfSoundSingletonSymbol =
@@ -41,7 +89,13 @@ namespace xenomods {
 
 		void* LastMasterVolume = nullptr;
 		void* ReadyGfSound = nullptr;
+		void* CandidateGfSound = nullptr;
+		int CandidateStableFrames = 0;
+		constexpr int ExistingSoundReadyFrames = 120;
 		bool Muted = false;
+		bool EnabledStateAppliedForMaster = false;
+		int EnabledSilentFrames = 0;
+		constexpr int SilentRecoveryFrames = 15;
 		float SavedEventBgmVolume = 1.f;
 		float SavedGameBgmVolume = 1.f;
 		float SavedMenuBgmVolume = 1.f;
@@ -54,6 +108,11 @@ namespace xenomods {
 				// handle and copied the user's saved volume options into it. A mute
 				// restored from toolWindows.toml must not touch the setters before this.
 				ReadyGfSound = sound;
+				CandidateGfSound = sound;
+				CandidateStableFrames = ExistingSoundReadyFrames;
+				LastMasterVolume = nullptr;
+				EnabledStateAppliedForMaster = false;
+				EnabledSilentFrames = 0;
 			}
 		};
 
@@ -116,14 +175,28 @@ namespace xenomods {
 			);
 	}
 
+	void AudioControls::PlaybackMenuSection() {
+		if(ImGui::Checkbox("Disable Error Sound", &DisableErrorSound))
+			SavePlaybackSettingsIfChanged();
+		if(ImGui::IsItemHovered())
+			ImGui::SetTooltip("Disables common/MNU_SoundSe sound ID 7 only.");
+	}
+
 	void AudioControls::Initialize() {
 		UpdatableModule::Initialize();
 #if XENOMODS_CODENAME(bf2)
+		const toml::parse_result settings = toml::parse_file(PlaybackSettingsPath());
+		if(settings) {
+			DisableErrorSound =
+				settings["disable_error_sound"]["enabled"].value_or(false);
+		}
+		LastSavedDisableErrorSound = DisableErrorSound;
 		if(!ResolveAudioFunctions())
 			g_Logger->LogError("Background-music control symbols are unavailable");
 		else
 			g_Logger->LogInfo("Background-music controls installed");
 		GfSoundSetupGameHook::HookAt("_ZN2gf7GfSound9setupGameEv");
+		MenuErrorSoundHook::HookAt("_ZN2gf13GfMenuObjUtil6playSEEj");
 #endif
 	}
 
@@ -141,20 +214,38 @@ namespace xenomods {
 		if(sound == nullptr) {
 			LastMasterVolume = nullptr;
 			ReadyGfSound = nullptr;
-			Muted = false;
+			CandidateGfSound = nullptr;
+			CandidateStableFrames = 0;
+			EnabledStateAppliedForMaster = false;
+			EnabledSilentFrames = 0;
 			return;
 		}
-		if(sound != ReadyGfSound)
-			return;
+		if(sound != ReadyGfSound) {
+			// Eden can reload the plugin after setupGame has already run. In that
+			// case the definitive hook cannot fire for the existing instance. Require
+			// the singleton to remain stable for several seconds before treating it as
+			// initialized; this retains the startup crash guard while allowing hot reload.
+			if(sound != CandidateGfSound) {
+				CandidateGfSound = sound;
+				CandidateStableFrames = 1;
+			} else {
+				CandidateStableFrames++;
+			}
+			if(CandidateStableFrames < ExistingSoundReadyFrames)
+				return;
+			ReadyGfSound = sound;
+		}
 
 		void* const masterVolume =
 			reinterpret_cast<std::uint8_t*>(sound) + MasterVolumeOffset;
 		if(masterVolume != LastMasterVolume) {
 			LastMasterVolume = masterVolume;
-			Muted = false;
+			EnabledStateAppliedForMaster = false;
+			EnabledSilentFrames = 0;
 		}
 
 		if(!BackgroundMusic) {
+			EnabledSilentFrames = 0;
 			if(!Muted) {
 				SavedEventBgmVolume = ReadVolume(
 					masterVolume,
@@ -163,6 +254,7 @@ namespace xenomods {
 				SavedGameBgmVolume = ReadVolume(masterVolume, GameBgmVolumeOffset);
 				SavedMenuBgmVolume = ReadVolume(masterVolume, MenuBgmVolumeOffset);
 				Muted = true;
+				EnabledStateAppliedForMaster = false;
 			}
 
 			// Native option/setup paths may restore these fields during loads. Only
@@ -174,15 +266,48 @@ namespace xenomods {
 			)
 				ApplyVolumes(masterVolume, 0.f, 0.f, 0.f);
 		}
-		else if(Muted) {
-			ApplyVolumes(
+		else {
+			const float eventVolume = ReadVolume(
 				masterVolume,
-				SavedEventBgmVolume,
-				SavedGameBgmVolume,
-				SavedMenuBgmVolume
+				EventBgmVolumeOffset
 			);
+			const float gameVolume = ReadVolume(masterVolume, GameBgmVolumeOffset);
+			const float menuVolume = ReadVolume(masterVolume, MenuBgmVolumeOffset);
+			const bool allSilent =
+				eventVolume == 0.f && gameVolume == 0.f && menuVolume == 0.f;
+			EnabledSilentFrames = allSilent ? EnabledSilentFrames + 1 : 0;
+			if(
+				Muted
+				|| !EnabledStateAppliedForMaster
+				|| EnabledSilentFrames >= SilentRecoveryFrames
+			) {
+				// If this process inherited the zeroed master categories from an older
+				// build, there is no live Saved* state to recover. One is the native
+				// full-volume fallback and immediately makes an enabled toggle audible.
+				const bool savedVolumesAreSilent = SavedEventBgmVolume == 0.f
+					&& SavedGameBgmVolume == 0.f
+					&& SavedMenuBgmVolume == 0.f;
+				ApplyVolumes(
+					masterVolume,
+					savedVolumesAreSilent ? 1.f : SavedEventBgmVolume,
+					savedVolumesAreSilent ? 1.f : SavedGameBgmVolume,
+					savedVolumesAreSilent ? 1.f : SavedMenuBgmVolume
+				);
+				EnabledSilentFrames = 0;
+			}
 			Muted = false;
+			EnabledStateAppliedForMaster = true;
 		}
+#endif
+	}
+
+	void AudioControls::OnMapChange(unsigned short) {
+#if XENOMODS_CODENAME(bf2)
+		// Cross-region loads can rebuild or zero the native BGM categories without
+		// replacing the GfSound singleton. Invalidate the enabled-state cache so the
+		// newly loaded region receives the user's saved levels on its first safe update.
+		EnabledStateAppliedForMaster = false;
+		EnabledSilentFrames = 0;
 #endif
 	}
 

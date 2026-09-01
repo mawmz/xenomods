@@ -46,6 +46,7 @@ namespace xenomods {
 			ImGuiLight,
 			ImGuiClassic,
 			DougBinks,
+			Comfy,
 		};
 
 		Theme SetTheme(Theme theme);
@@ -74,6 +75,7 @@ constexpr magic_enum::customize::customize_t magic_enum::customize::enum_name<xe
 		case ImGuiLight: return "Dear ImGui Light";
 		case ImGuiClassic: return "Dear ImGui Classic";
 		case DougBinks: return "Doug Binks";
+		case Comfy: return "Comfy";
 	}
 	// clang-format on
 	return default_tag;

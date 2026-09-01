@@ -39,6 +39,54 @@ namespace xenomods {
 			bool afterUpdate,
 			bool accepted,
 			std::uint16_t emittedEvent,
+			std::uint16_t secondaryEvent,
+			std::uint32_t secondaryAction,
+			std::uint32_t heldButtons,
+			std::uint32_t downButtons
+		);
+		static void OnTutorialBegin(
+			std::uint32_t family,
+			const void* menu
+		);
+		static void OnTutorialEnd(
+			std::uint32_t family,
+			const void* menu
+		);
+		static void OnTutorialListenerRegistered(
+			std::uint32_t family,
+			const void* menu,
+			const void* listener,
+			std::uint32_t object
+		);
+		static void OnTutorialListenerEvent(
+			std::uint32_t family,
+			const void* menu,
+			const void* listener,
+			std::uint16_t event,
+			std::uint32_t action,
+			std::uint32_t object,
+			std::uint64_t sequenceCount,
+			bool after
+		);
+		static void OnTutorialAdvanceRequested(
+			std::uint32_t family,
+			const void* menu,
+			std::uint32_t object,
+			std::uint64_t sequenceCount
+		);
+		static void OnTutorialAdvanceAccepted(
+			std::uint32_t object,
+			std::uint32_t layerHandle
+		);
+		static void OnTutorialInputLayerUpdate(
+			std::uint32_t object,
+			const void* inputLayer,
+			std::uint32_t layerHandle,
+			bool afterUpdate,
+			bool accepted,
+			std::uint16_t emittedEvent,
+			std::uint16_t secondaryEvent,
+			std::uint32_t secondaryAction,
 			std::uint32_t heldButtons,
 			std::uint32_t downButtons
 		);

@@ -25,11 +25,14 @@
 #include "xenomods/State.hpp"
 #include "xenomods/menu/Menu.hpp"
 
+#include "AutoCutsceneSkips.hpp"
+
 namespace {
 	bool tutorialBladeBondPending = false;
 	bool tutorialBladeBondOpen = false;
 	bool auxCoreRecipeOpen = false;
 	bool auxCoreShopWaitingForInput = false;
+	bool auxCoreShopSession = false;
 	std::uint32_t auxCoreListInputHandle = 0;
 	std::uint32_t auxCoreRecipeInputHandle = 0;
 	bool acceptingAuxCoreAmountPlayback = false;
@@ -41,6 +44,8 @@ namespace {
 		bool afterUpdate,
 		bool accepted,
 		std::uint16_t emittedEvent,
+		std::uint16_t secondaryEvent,
+		std::uint32_t secondaryAction,
 		std::uint32_t heldButtons,
 		std::uint32_t downButtons
 	) {
@@ -51,6 +56,32 @@ namespace {
 			afterUpdate,
 			accepted,
 			emittedEvent,
+			secondaryEvent,
+			secondaryAction,
+			heldButtons,
+			downButtons
+		);
+		xenomods::SkipTravelProfiler::OnTutorialInputLayerUpdate(
+			object,
+			inputLayer,
+			layerHandle,
+			afterUpdate,
+			accepted,
+			emittedEvent,
+			secondaryEvent,
+			secondaryAction,
+			heldButtons,
+			downButtons
+		);
+		xenomods::AutoCutsceneSkips::OnInputLayerUpdate(
+			object,
+			inputLayer,
+			layerHandle,
+			afterUpdate,
+			accepted,
+			emittedEvent,
+			secondaryEvent,
+			secondaryAction,
 			heldButtons,
 			downButtons
 		);
@@ -195,11 +226,20 @@ namespace {
 
 	struct MenuInputEnableHook
 		: skylaunch::hook::Trampoline<MenuInputEnableHook> {
-		static void Hook(unsigned int input) {
+		static void Hook(void* menu, unsigned int input) {
 			xenomods::SkipTravelProfiler::OnAuxEnableInput(false, input);
-			Orig(input);
+			Orig(menu, input);
 			xenomods::SkipTravelProfiler::OnAuxEnableInput(true, input);
+			xenomods::MenuHelper::OnShopInputEnabled(input);
 			xenomods::MenuHelper::OnMenuInputEnabled();
+		}
+	};
+
+	struct MenuInputDisableHook
+		: skylaunch::hook::Trampoline<MenuInputDisableHook> {
+		static void Hook(void* menu, unsigned int input) {
+			xenomods::MenuHelper::OnShopInputDisabled(input);
+			Orig(menu, input);
 		}
 	};
 
@@ -382,8 +422,7 @@ namespace xenomods {
 		InputBuffer::AcceptedAction lastRecordedAction {};
 		std::uint32_t playbackNeutralFrames = 0;
 		bool shopOpen = false;
-		bool shopSessionDeferred = false;
-		std::uint64_t shopSessionDeferredFrame = 0;
+		bool shopTransitionBlocked = false;
 		bool mainMenuOpen = false;
 		bool mainMenuOpening = false;
 		bool mainMenuInputReady = false;
@@ -579,6 +618,9 @@ namespace xenomods {
 				state != HelperState::Playing
 				|| playbackNeutralFrames != 0
 				|| InputBuffer::PlaybackActionPending()
+				|| (activeKind == RecordingKind::Shop
+					&& !auxCoreShopSession
+					&& shopTransitionBlocked)
 			)
 				return;
 			if(playbackIndex >= playbackActions.size()) {
@@ -588,8 +630,15 @@ namespace xenomods {
 			InputBuffer::SetPlaybackAction(playbackActions[playbackIndex]);
 		}
 
-		void LoadRecordings() {
-			recordings.clear();
+		bool LoadRecordings() {
+			const bool hadSelection = selectedRecording >= 0
+				&& selectedRecording < static_cast<int>(recordings.size());
+			const std::string selectedName = hadSelection
+				? recordings[selectedRecording].name
+				: std::string{};
+			const RecordingKind selectedKind = hadSelection
+				? recordings[selectedRecording].kind
+				: RecordingKind::Shop;
 			const std::string path = RecordingsPath();
 			toml::parse_result result = toml::parse_file(path);
 			if(!result) {
@@ -601,16 +650,17 @@ namespace xenomods {
 				}
 			}
 			if(!result)
-				return;
+				return false;
 			const int version = result.table()["version"].value_or(0);
 			if(version != 11)
-				return;
+				return false;
 
 			const auto entries = result.table().get_as<toml::array>("recordings");
 			if(entries == nullptr)
-				return;
+				return false;
+			std::vector<Recording> loadedRecordings;
 			for(const auto& element : *entries) {
-				if(recordings.size() >= MaxRecordings)
+				if(loadedRecordings.size() >= MaxRecordings)
 					break;
 				const auto entry = element.as_table();
 				if(entry == nullptr)
@@ -657,9 +707,24 @@ namespace xenomods {
 						});
 				}
 				if(!recording.actions.empty())
-					recordings.push_back(std::move(recording));
+					loadedRecordings.push_back(std::move(recording));
 			}
+
+			recordings = std::move(loadedRecordings);
 			selectedRecording = recordings.empty() ? -1 : 0;
+			if(hadSelection) {
+				const auto selected = std::find_if(
+					recordings.begin(),
+					recordings.end(),
+					[&](const Recording& recording) {
+						return recording.kind == selectedKind
+							&& recording.name == selectedName;
+					}
+				);
+				if(selected != recordings.end())
+					selectedRecording = static_cast<int>(selected - recordings.begin());
+			}
+			return true;
 		}
 
 		bool SaveRecordings() {
@@ -810,7 +875,9 @@ namespace xenomods {
 					true,
 					activeKind == RecordingKind::Travel
 						? InputBuffer::PlaybackMode::TravelUiBuffered
-						: InputBuffer::PlaybackMode::StandardMenu
+						: activeKind == RecordingKind::Shop && !auxCoreShopSession
+							? InputBuffer::PlaybackMode::ShopMenuLayered
+							: InputBuffer::PlaybackMode::StandardMenu
 				);
 				QueueNextPlaybackAction();
 				g_Logger->ToastInfo("menu-helper", "{} playback started", label);
@@ -1038,6 +1105,11 @@ namespace xenomods {
 			&& (state == HelperState::ArmedPlayback || IsPlaybackActive());
 	}
 
+	void MenuHelper::CancelActivePlayback() {
+		if(state == HelperState::ArmedPlayback || IsPlaybackActive())
+			StopPlayback(HelperState::Cancelled);
+	}
+
 	bool MenuHelper::IsPlaybackPendingOrActive() {
 		return state == HelperState::ArmedPlayback || IsPlaybackActive();
 	}
@@ -1087,6 +1159,24 @@ namespace xenomods {
 			|| state == HelperState::Recording
 			|| state == HelperState::ArmedPlayback
 			|| IsPlaybackActive();
+		ImGui::SameLine();
+		if(modeLocked)
+			ImGui::BeginDisabled();
+		if(ImGui::Button("Reload")) {
+			if(LoadRecordings())
+				g_Logger->ToastInfo(
+					"menu-helper-reload",
+					"Reloaded {} Menu Tool recording(s)",
+					recordings.size()
+				);
+			else
+				g_Logger->ToastWarning(
+					"menu-helper-reload",
+					"Could not reload Menu Tool recordings"
+				);
+		}
+		if(modeLocked)
+			ImGui::EndDisabled();
 		if(modeLocked)
 			ImGui::BeginDisabled();
 		ImGui::SetNextItemWidth(110.f);
@@ -1254,26 +1344,44 @@ namespace xenomods {
 			&& state != HelperState::ArmedPlayback
 		)
 			return;
+		const bool newlyOpened = !shopOpen;
 		shopOpen = true;
+		if(newlyOpened)
+			shopTransitionBlocked = false;
 		OnSandboxMenuOpened();
-		if(auxCoreShopWaitingForInput)
+		if(auxCoreShopSession)
 			return;
+		BeginActiveSession(RecordingKind::Shop, "Shop");
+	}
+
+	void MenuHelper::OnShopInputDisabled(std::uint32_t) {
 		if(
-			activeKind == RecordingKind::Shop
-			&& (state == HelperState::ArmedRecord || state == HelperState::ArmedPlayback)
+			!shopOpen
+			|| auxCoreShopSession
+			|| activeKind != RecordingKind::Shop
+			|| !IsPlaybackActive()
 		)
-		{
-			shopSessionDeferred = true;
-			shopSessionDeferredFrame = updateFrame;
-		}
+			return;
+		shopTransitionBlocked = true;
+	}
+
+	void MenuHelper::OnShopInputEnabled(std::uint32_t) {
+		if(
+			!shopOpen
+			|| auxCoreShopSession
+			|| activeKind != RecordingKind::Shop
+			|| !IsPlaybackActive()
+		)
+			return;
+		shopTransitionBlocked = false;
 	}
 
 	void MenuHelper::OnAuxCoreShopOpening() {
 		auxCoreShopWaitingForInput = true;
+		auxCoreShopSession = true;
 		auxCoreListInputHandle = 0;
 		auxCoreRecipeInputHandle = 0;
-		shopSessionDeferred = false;
-		shopSessionDeferredFrame = 0;
+		shopTransitionBlocked = false;
 		if(activeKind != RecordingKind::Shop)
 			return;
 		if(IsPlaybackActive()) {
@@ -1302,8 +1410,6 @@ namespace xenomods {
 			return;
 		auxCoreShopWaitingForInput = false;
 		auxCoreListInputHandle = 0;
-		shopSessionDeferred = false;
-		shopSessionDeferredFrame = 0;
 		shopOpen = true;
 		BeginActiveSession(RecordingKind::Shop, "Shop");
 	}
@@ -1312,10 +1418,10 @@ namespace xenomods {
 		auxCoreRecipeOpen = false;
 		InputBuffer::SetAuxCoreAmountMenu(false);
 		auxCoreShopWaitingForInput = false;
+		auxCoreShopSession = false;
 		auxCoreListInputHandle = 0;
 		auxCoreRecipeInputHandle = 0;
-		shopSessionDeferred = false;
-		shopSessionDeferredFrame = 0;
+		shopTransitionBlocked = false;
 		InputBuffer::ResetAuxCoreAmountInput();
 		if(activeKind != RecordingKind::Shop && !shopOpen)
 			return;
@@ -1512,6 +1618,18 @@ namespace xenomods {
 			"_ZN2gf13GfPlayFactory15createOpenMenu2EjNS_8MAINMENUEPNS_22GfSequentialPlaySignalE"
 		);
 		MenuInputEnableHook::HookAt("_ZN2gf12GfMenuObject11enableInputEj");
+		const auto disableInputAddress =
+			skylaunch::hook::detail::ResolveSymbolBase(
+				"_ZN2gf12GfMenuObject12disableInputEj"
+			);
+		if(disableInputAddress != skylaunch::hook::INVALID_FUNCTION_PTR)
+			MenuInputDisableHook::HookAt(
+				"_ZN2gf12GfMenuObject12disableInputEj"
+			);
+		else
+			g_Logger->LogWarning(
+				"Menu Tool couldn't resolve GfMenuObject::disableInput"
+			);
 		TutorialBladeBondRequestHook::HookAt(
 			"_ZN2gf13GfMenuManager24openBladeCreateFromEventEj"
 		);
@@ -1553,15 +1671,6 @@ namespace xenomods {
 		updateFrame++;
 		InputBuffer::SetFrameIndex(updateFrame);
 		FreezeSandboxData();
-		if(
-			shopSessionDeferred
-			&& !auxCoreShopWaitingForInput
-			&& updateFrame >= shopSessionDeferredFrame + 2
-		) {
-			shopSessionDeferred = false;
-			shopSessionDeferredFrame = 0;
-			BeginActiveSession(RecordingKind::Shop, "Shop");
-		}
 		if(IsPlaybackActive()) {
 			if((HidInput::GetPlayer(1)->stateCur.Buttons & AbortMask) == AbortMask) {
 				StopPlayback(HelperState::Cancelled);
@@ -1586,10 +1695,10 @@ namespace xenomods {
 		auxCoreRecipeOpen = false;
 		InputBuffer::SetAuxCoreAmountMenu(false);
 		auxCoreShopWaitingForInput = false;
+		auxCoreShopSession = false;
 		auxCoreListInputHandle = 0;
 		auxCoreRecipeInputHandle = 0;
-		shopSessionDeferred = false;
-		shopSessionDeferredFrame = 0;
+		shopTransitionBlocked = false;
 		InputBuffer::ResetAuxCoreAmountInput();
 		const bool armedMenu = activeKind == RecordingKind::Menu
 			&& (state == HelperState::ArmedPlayback

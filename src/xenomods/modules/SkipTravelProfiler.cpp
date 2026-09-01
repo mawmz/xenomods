@@ -1,5 +1,6 @@
 #include "SkipTravelProfiler.hpp"
 #include "MenuHelper.hpp"
+#include "AutoCutsceneSkips.hpp"
 
 #include <algorithm>
 #include <array>
@@ -213,6 +214,64 @@ namespace {
 	bool auxPadUpdateHookInstalled = false;
 	bool auxMoveSelectHookInstalled = false;
 
+	enum class TutorialTraceKind : std::uint8_t {
+		Begin,
+		End,
+		ListenerRegistered,
+		ListenerEnter,
+		ListenerReturn,
+		AdvanceRequested,
+		LayerEnter,
+		LayerReturn,
+		AdvanceAccepted
+	};
+
+	struct TutorialTraceSample {
+		TutorialTraceKind kind {};
+		std::uint64_t frame = 0;
+		std::uint64_t tick = 0;
+		std::uintptr_t address = 0;
+		std::uint64_t sequenceCount = 0;
+		std::uint32_t family = 0;
+		std::uint32_t object = 0;
+		std::uint32_t layer = 0;
+		std::uint32_t enabledMask = 0;
+		std::uint32_t held = 0;
+		std::uint32_t down = 0;
+		std::uint16_t primaryEvent = 0;
+		std::uint16_t secondaryEvent = 0;
+		std::uint32_t action = 0;
+		bool accepted = false;
+		bool targetMatch = false;
+	};
+
+	struct TutorialLayerSnapshot {
+		const void* layer = nullptr;
+		std::uint32_t handle = 0;
+		std::uint32_t object = 0;
+		std::uint32_t enabledMask = 0;
+		std::uint32_t held = 0;
+		std::uint32_t down = 0;
+		std::uint16_t primaryEvent = 0;
+		std::uint16_t secondaryEvent = 0;
+		std::uint32_t action = 0;
+		bool accepted = false;
+	};
+
+	constexpr std::size_t TutorialTraceCapacity = 4096;
+	std::array<TutorialTraceSample, TutorialTraceCapacity> tutorialTrace {};
+	std::array<TutorialLayerSnapshot, 96> tutorialLayerSnapshots {};
+	std::size_t tutorialTraceCount = 0;
+	std::size_t tutorialTraceDropped = 0;
+	std::uint64_t tutorialTraceStartFrame = 0;
+	std::uint64_t tutorialTraceStartTick = 0;
+	std::uintptr_t tutorialMenu = 0;
+	std::uint32_t tutorialFamily = 0;
+	std::uint32_t tutorialTargetObject = 0;
+	std::uint32_t tutorialLastRequestedObject = 0;
+	bool tutorialCaptureEnabled = true;
+	bool tutorialTraceRunning = false;
+
 	const char* AuxTraceName(AuxTraceKind kind) {
 		switch(kind) {
 			case AuxTraceKind::ShopRequest: return "MainListener shop request";
@@ -243,6 +302,229 @@ namespace {
 			case AuxTraceKind::PlaybackAction: return "Playback action accepted";
 		}
 		return "Unknown";
+	}
+
+	const char* TutorialFamilyName(std::uint32_t family) {
+		switch(family) {
+			case 0: return "Standard";
+			case 1: return "Dummy/Event";
+			case 2: return "Battle";
+			case 3: return "Tips";
+			default: return "Unknown";
+		}
+	}
+
+	const char* TutorialTraceName(TutorialTraceKind kind) {
+		switch(kind) {
+			case TutorialTraceKind::Begin: return "Tutorial initialize";
+			case TutorialTraceKind::End: return "Tutorial finalize";
+			case TutorialTraceKind::ListenerRegistered: return "Listener registered";
+			case TutorialTraceKind::ListenerEnter: return "Listener enter";
+			case TutorialTraceKind::ListenerReturn: return "Listener return";
+			case TutorialTraceKind::AdvanceRequested: return "Auto A requested";
+			case TutorialTraceKind::LayerEnter: return "UIInputLayer enter";
+			case TutorialTraceKind::LayerReturn: return "UIInputLayer return";
+			case TutorialTraceKind::AdvanceAccepted: return "Native action accepted";
+		}
+		return "Unknown";
+	}
+
+	constexpr std::array<std::uint32_t, 27> TutorialUiPadToFwPad {
+		0x00000000, 0x00000004, 0x00000002, 0x00000004, 0x00000002,
+		0x00000008, 0x00000001, 0x00001000, 0x00004000, 0x00002000,
+		0x00008000, 0x00000010, 0x00000040, 0x00000400, 0x00000020,
+		0x00000080, 0x00000800, 0x00000200, 0x00000100, 0x01000000,
+		0x04000000, 0x02000000, 0x08000000, 0x10000000, 0x40000000,
+		0x20000000, 0x80000000
+	};
+
+	std::uint32_t TutorialLayerEnabledMask(const void* inputLayer) {
+		if(inputLayer == nullptr)
+			return 0;
+		const auto* bytes = reinterpret_cast<const std::uint8_t*>(inputLayer);
+		const std::uint64_t count = *reinterpret_cast<const std::uint64_t*>(
+			bytes + 0x200
+		);
+		if(count > 27)
+			return 0;
+		std::uint32_t mask = 0;
+		for(std::uint64_t index = 0; index < count; index++) {
+			const auto* entry = bytes + 0x50 + index * 0x10;
+			const std::uint16_t uiPad = *reinterpret_cast<const std::uint16_t*>(entry);
+			if(uiPad < TutorialUiPadToFwPad.size() && entry[0xf] != 0)
+				mask |= TutorialUiPadToFwPad[uiPad];
+		}
+		return mask;
+	}
+
+	void ClearTutorialTrace() {
+		xenomods::InputBuffer::SetInputLayerPadCapture(false);
+		tutorialTraceCount = 0;
+		tutorialTraceDropped = 0;
+		tutorialTraceStartFrame = profilerFrame;
+		tutorialTraceStartTick = nn::os::GetSystemTick();
+		tutorialMenu = 0;
+		tutorialFamily = 0;
+		tutorialTargetObject = 0;
+		tutorialLastRequestedObject = 0;
+		tutorialLayerSnapshots = {};
+		tutorialTraceRunning = false;
+	}
+
+	void StartTutorialTrace() {
+		ClearTutorialTrace();
+		tutorialTraceRunning = true;
+		xenomods::InputBuffer::SetInputLayerPadCapture(true);
+	}
+
+	void RecordTutorialTrace(
+		TutorialTraceKind kind,
+		std::uintptr_t address = 0,
+		std::uint32_t family = 0,
+		std::uint32_t object = 0,
+		std::uint32_t layer = 0,
+		std::uint32_t enabledMask = 0,
+		std::uint32_t held = 0,
+		std::uint32_t down = 0,
+		std::uint16_t primaryEvent = 0,
+		std::uint16_t secondaryEvent = 0,
+		std::uint32_t action = 0,
+		std::uint64_t sequenceCount = 0,
+		bool accepted = false
+	) {
+		if(!tutorialTraceRunning)
+			return;
+		if(tutorialTraceCount >= tutorialTrace.size()) {
+			tutorialTraceDropped++;
+			return;
+		}
+		tutorialTrace[tutorialTraceCount++] = {
+			kind,
+			profilerFrame,
+			nn::os::GetSystemTick(),
+			address,
+			sequenceCount,
+			family,
+			object,
+			layer,
+			enabledMask,
+			held,
+			down,
+			primaryEvent,
+			secondaryEvent,
+			action,
+			accepted,
+			object != 0 && object == tutorialTargetObject
+		};
+	}
+
+	TutorialLayerSnapshot* TutorialSnapshotFor(const void* layer) {
+		TutorialLayerSnapshot* freeSnapshot = nullptr;
+		for(auto& snapshot : tutorialLayerSnapshots) {
+			if(snapshot.layer == layer)
+				return &snapshot;
+			if(freeSnapshot == nullptr && snapshot.layer == nullptr)
+				freeSnapshot = &snapshot;
+		}
+		return freeSnapshot;
+	}
+
+	void DrawTutorialTrace() {
+		if(ImGui::Checkbox("Capture tutorial input", &tutorialCaptureEnabled)) {
+			if(tutorialCaptureEnabled)
+				StartTutorialTrace();
+			else
+				tutorialTraceRunning = false;
+		}
+		ImGui::SameLine();
+		if(ImGui::Button("Start / restart now")) {
+			tutorialCaptureEnabled = true;
+			StartTutorialTrace();
+		}
+		ImGui::SameLine();
+		if(ImGui::Button("Clear tutorial trace"))
+			ClearTutorialTrace();
+		ImGui::SameLine();
+		if(tutorialTraceRunning)
+			ImGui::TextColored(ImVec4(0.3f, 1.f, 0.4f, 1.f), "CAPTURING");
+		else if(tutorialCaptureEnabled)
+			ImGui::TextDisabled("ARMED");
+		else
+			ImGui::TextDisabled("Capture disabled");
+
+		ImGui::TextWrapped(
+			"Observational trace for Auto Tutorials. It records the exact tutorial "
+			"object/listener lifecycle and every changing UIInputLayer state while a "
+			"tutorial is active, including enabled pad masks, raw Held/Down, primary "
+			"and secondary native events, action payload, and acceptance."
+		);
+		ImGui::Text(
+			"Family: %s  Menu: 0x%llX  Target object: %u  Samples: %u  Dropped: %u",
+			TutorialFamilyName(tutorialFamily),
+			static_cast<unsigned long long>(tutorialMenu),
+			tutorialTargetObject,
+			static_cast<unsigned>(tutorialTraceCount),
+			static_cast<unsigned>(tutorialTraceDropped)
+		);
+
+		if(ImGui::BeginTable(
+			"TutorialInputTrace",
+			11,
+			ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg
+				| ImGuiTableFlags_ScrollY | ImGuiTableFlags_Resizable,
+			ImVec2(0.f, 455.f)
+		)) {
+			ImGui::TableSetupScrollFreeze(0, 1);
+			ImGui::TableSetupColumn("Call", ImGuiTableColumnFlags_WidthFixed, 185.f);
+			ImGui::TableSetupColumn("Df", ImGuiTableColumnFlags_WidthFixed, 48.f);
+			ImGui::TableSetupColumn("ms", ImGuiTableColumnFlags_WidthFixed, 70.f);
+			ImGui::TableSetupColumn("Family", ImGuiTableColumnFlags_WidthFixed, 80.f);
+			ImGui::TableSetupColumn("Object", ImGuiTableColumnFlags_WidthFixed, 70.f);
+			ImGui::TableSetupColumn("Layer", ImGuiTableColumnFlags_WidthFixed, 65.f);
+			ImGui::TableSetupColumn("Enabled", ImGuiTableColumnFlags_WidthFixed, 85.f);
+			ImGui::TableSetupColumn("Held / Down", ImGuiTableColumnFlags_WidthFixed, 165.f);
+			ImGui::TableSetupColumn("Events", ImGuiTableColumnFlags_WidthFixed, 90.f);
+			ImGui::TableSetupColumn("Action / Seq", ImGuiTableColumnFlags_WidthFixed, 100.f);
+			ImGui::TableSetupColumn("Result / Address");
+			ImGui::TableHeadersRow();
+			for(std::size_t index = 0; index < tutorialTraceCount; index++) {
+				const auto& sample = tutorialTrace[index];
+				ImGui::TableNextRow();
+				ImGui::TableSetColumnIndex(0);
+				const bool success = sample.kind == TutorialTraceKind::AdvanceAccepted
+					|| (sample.secondaryEvent == 8 && sample.action == 1);
+				if(success)
+					ImGui::TextColored(ImVec4(0.3f, 1.f, 0.4f, 1.f), "%s", TutorialTraceName(sample.kind));
+				else if(sample.kind == TutorialTraceKind::AdvanceRequested)
+					ImGui::TextColored(ImVec4(1.f, 0.8f, 0.2f, 1.f), "%s", TutorialTraceName(sample.kind));
+				else
+					ImGui::TextUnformatted(TutorialTraceName(sample.kind));
+				ImGui::TableSetColumnIndex(1);
+				ImGui::Text("%llu", sample.frame - tutorialTraceStartFrame);
+				ImGui::TableSetColumnIndex(2);
+				ImGui::Text("%.3f", static_cast<double>(sample.tick - tutorialTraceStartTick) / TicksPerMillisecond);
+				ImGui::TableSetColumnIndex(3);
+				ImGui::TextUnformatted(TutorialFamilyName(sample.family));
+				ImGui::TableSetColumnIndex(4);
+				if(sample.targetMatch)
+					ImGui::TextColored(ImVec4(0.3f, 1.f, 0.4f, 1.f), "%u*", sample.object);
+				else
+					ImGui::Text("%u", sample.object);
+				ImGui::TableSetColumnIndex(5);
+				ImGui::Text("%u", sample.layer);
+				ImGui::TableSetColumnIndex(6);
+				ImGui::Text("%08X", sample.enabledMask);
+				ImGui::TableSetColumnIndex(7);
+				ImGui::Text("%08X / %08X", sample.held, sample.down);
+				ImGui::TableSetColumnIndex(8);
+				ImGui::Text("%X / %X", sample.primaryEvent, sample.secondaryEvent);
+				ImGui::TableSetColumnIndex(9);
+				ImGui::Text("%u / %llu", sample.action, sample.sequenceCount);
+				ImGui::TableSetColumnIndex(10);
+				ImGui::Text("%s 0x%llX", sample.accepted ? "accepted" : "-", static_cast<unsigned long long>(sample.address));
+			}
+			ImGui::EndTable();
+		}
 	}
 
 	void ClearAuxTrace() {
@@ -1521,6 +1803,14 @@ namespace xenomods {
 			DrawAuxTrace();
 			ImGui::EndTabItem();
 		}
+		if(ImGui::BeginTabItem("Tutorial Input")) {
+			DrawTutorialTrace();
+			ImGui::EndTabItem();
+		}
+		if(ImGui::BeginTabItem("Cutscene Skip")) {
+			AutoCutsceneSkips::ProfilerSection();
+			ImGui::EndTabItem();
+		}
 		ImGui::EndTabBar();
 		}
 
@@ -1599,6 +1889,8 @@ namespace xenomods {
 		bool afterUpdate,
 		bool accepted,
 		std::uint16_t emittedEvent,
+		std::uint16_t,
+		std::uint32_t,
 		std::uint32_t heldButtons,
 		std::uint32_t downButtons
 	) {
@@ -1667,6 +1959,218 @@ namespace xenomods {
 			action.display,
 			0,
 			true
+		);
+	}
+
+	void SkipTravelProfiler::OnTutorialBegin(
+		std::uint32_t family,
+		const void* menu
+	) {
+		if(!tutorialCaptureEnabled)
+			return;
+		StartTutorialTrace();
+		tutorialFamily = family;
+		tutorialMenu = reinterpret_cast<std::uintptr_t>(menu);
+		RecordTutorialTrace(
+			TutorialTraceKind::Begin,
+			tutorialMenu,
+			family
+		);
+	}
+
+	void SkipTravelProfiler::OnTutorialEnd(
+		std::uint32_t family,
+		const void* menu
+	) {
+		if(!tutorialTraceRunning)
+			return;
+		RecordTutorialTrace(
+			TutorialTraceKind::End,
+			reinterpret_cast<std::uintptr_t>(menu),
+			family,
+			tutorialTargetObject
+		);
+		tutorialTraceRunning = false;
+	}
+
+	void SkipTravelProfiler::OnTutorialListenerRegistered(
+		std::uint32_t family,
+		const void* menu,
+		const void* listener,
+		std::uint32_t object
+	) {
+		if(!tutorialTraceRunning)
+			return;
+		tutorialFamily = family;
+		tutorialMenu = reinterpret_cast<std::uintptr_t>(menu);
+		tutorialTargetObject = object;
+		tutorialLastRequestedObject = 0;
+		RecordTutorialTrace(
+			TutorialTraceKind::ListenerRegistered,
+			reinterpret_cast<std::uintptr_t>(listener),
+			family,
+			object
+		);
+	}
+
+	void SkipTravelProfiler::OnTutorialListenerEvent(
+		std::uint32_t family,
+		const void* menu,
+		const void* listener,
+		std::uint16_t event,
+		std::uint32_t action,
+		std::uint32_t object,
+		std::uint64_t sequenceCount,
+		bool after
+	) {
+		if(!tutorialTraceRunning)
+			return;
+		// GfMenuObjTutorial is a persistent UI layer. A capture may begin long
+		// after initialize(), so discover the live tutorial from its listener
+		// traffic instead of requiring the lifecycle hook to have fired first.
+		if(menu != nullptr) {
+			tutorialFamily = family;
+			tutorialMenu = reinterpret_cast<std::uintptr_t>(menu);
+		}
+		if(object != 0)
+			tutorialTargetObject = object;
+		RecordTutorialTrace(
+			after ? TutorialTraceKind::ListenerReturn : TutorialTraceKind::ListenerEnter,
+			reinterpret_cast<std::uintptr_t>(listener),
+			family,
+			object,
+			0,
+			0,
+			0,
+			0,
+			event,
+			0,
+			action,
+			sequenceCount
+		);
+	}
+
+	void SkipTravelProfiler::OnTutorialAdvanceRequested(
+		std::uint32_t family,
+		const void* menu,
+		std::uint32_t object,
+		std::uint64_t sequenceCount
+	) {
+		if(!tutorialTraceRunning || tutorialLastRequestedObject == object)
+			return;
+		tutorialLastRequestedObject = object;
+		RecordTutorialTrace(
+			TutorialTraceKind::AdvanceRequested,
+			reinterpret_cast<std::uintptr_t>(menu),
+			family,
+			object,
+			0,
+			0x00000004,
+			0,
+			0,
+			0,
+			0,
+			1,
+			sequenceCount
+		);
+	}
+
+	void SkipTravelProfiler::OnTutorialAdvanceAccepted(
+		std::uint32_t object,
+		std::uint32_t layerHandle
+	) {
+		if(!tutorialTraceRunning)
+			return;
+		RecordTutorialTrace(
+			TutorialTraceKind::AdvanceAccepted,
+			0,
+			tutorialFamily,
+			object,
+			layerHandle,
+			0x00000004,
+			0x00000004,
+			0x00000004,
+			0,
+			8,
+			1,
+			0,
+			true
+		);
+		tutorialLastRequestedObject = 0;
+	}
+
+	void SkipTravelProfiler::OnTutorialInputLayerUpdate(
+		std::uint32_t object,
+		const void* inputLayer,
+		std::uint32_t layerHandle,
+		bool afterUpdate,
+		bool accepted,
+		std::uint16_t emittedEvent,
+		std::uint16_t secondaryEvent,
+		std::uint32_t secondaryAction,
+		std::uint32_t heldButtons,
+		std::uint32_t downButtons
+	) {
+		if(!tutorialTraceRunning || inputLayer == nullptr)
+			return;
+		const std::uint32_t enabledMask = TutorialLayerEnabledMask(inputLayer);
+		auto* snapshot = TutorialSnapshotFor(inputLayer);
+		if(snapshot == nullptr) {
+			tutorialTraceDropped++;
+			return;
+		}
+		const bool first = snapshot->layer == nullptr;
+		if(!afterUpdate) {
+			if(first) {
+				RecordTutorialTrace(
+					TutorialTraceKind::LayerEnter,
+					reinterpret_cast<std::uintptr_t>(inputLayer),
+					tutorialFamily,
+					object,
+					layerHandle,
+					enabledMask
+				);
+			}
+			return;
+		}
+		const bool changed = first
+			|| snapshot->handle != layerHandle
+			|| snapshot->object != object
+			|| snapshot->enabledMask != enabledMask
+			|| snapshot->held != heldButtons
+			|| snapshot->down != downButtons
+			|| snapshot->primaryEvent != emittedEvent
+			|| snapshot->secondaryEvent != secondaryEvent
+			|| snapshot->action != secondaryAction
+			|| snapshot->accepted != accepted;
+		*snapshot = {
+			inputLayer,
+			layerHandle,
+			object,
+			enabledMask,
+			heldButtons,
+			downButtons,
+			emittedEvent,
+			secondaryEvent,
+			secondaryAction,
+			accepted
+		};
+		if(!changed)
+			return;
+		RecordTutorialTrace(
+			TutorialTraceKind::LayerReturn,
+			reinterpret_cast<std::uintptr_t>(inputLayer),
+			tutorialFamily,
+			object,
+			layerHandle,
+			enabledMask,
+			heldButtons,
+			downButtons,
+			emittedEvent,
+			secondaryEvent,
+			secondaryAction,
+			0,
+			accepted
 		);
 	}
 
@@ -1839,7 +2343,8 @@ namespace xenomods {
 			);
 		}
 
-		g_Menu->RegisterTopBarCallback(&TopBarButton);
+		if(auto misc = g_Menu->FindSection("misc"); misc != nullptr)
+			misc->RegisterRenderCallback(&TopBarButton);
 		g_Menu->RegisterRenderCallback(&ProfilerWindow, true);
 		if(auxCaptureEnabled)
 			StartAuxTrace();

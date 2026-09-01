@@ -4,6 +4,8 @@
 #include <imgui_internal.h>
 #include <imgui_xeno.h>
 
+#include <algorithm>
+
 #include <skylaunch/hookng/Hooks.hpp>
 #include <xenomods/DebugWrappers.hpp>
 #include <xenomods/HidInput.hpp>
@@ -107,9 +109,6 @@ namespace xenomods {
 
 		ImGui::PopItemWidth();
 
-		if(ImGui::Button("Reload config/BDAT overrides"))
-			XenomodsState::ReloadConfig();
-
 		bool loggingDisabled = g_Logger->IsLoggingDisabled();
 		if(ImGui::Checkbox("Disable logging", &loggingDisabled))
 			g_Logger->SetLoggingDisabled(loggingDisabled);
@@ -161,6 +160,8 @@ namespace xenomods {
 		auto state = RegisterSection("state", "State");
 		state->RegisterRenderCallback(&Section_State);
 
+		RegisterSection("misc", "Misc");
+
 		auto about = RegisterSection("about", "About");
 		about->RegisterRenderCallback(&Section_About);
 	}
@@ -208,8 +209,19 @@ namespace xenomods {
 			ImGui::MenuItem("ImGui Demo", "", &show_demo);
 #endif
 
-			ImGui::TextDisabled("%s", version::XenomodsVersion());
-			ImGui::TextDisabled("FPS: %d (%.4fms)", (int)(1.f/lastUpdateDiff), lastUpdateDiff);
+			const int fps = lastUpdateDiff > 0.0
+				? static_cast<int>(1.f / lastUpdateDiff)
+				: 0;
+			const auto status = fmt::format(
+				"{} FPS: {} ({:.4f}ms)",
+				version::XenomodsVersion(),
+				fps,
+				lastUpdateDiff
+			);
+			const float rightAlignedX =
+				ImGui::GetWindowContentRegionMax().x - ImGui::CalcTextSize(status.c_str()).x;
+			ImGui::SetCursorPosX(std::max(ImGui::GetCursorPosX(), rightAlignedX));
+			ImGui::TextDisabled("%s", status.c_str());
 			ImGui::EndMainMenuBar();
 		}
 #if _DEBUG
@@ -241,6 +253,22 @@ namespace xenomods {
 #endif
 		}
 
+		// Theme functions are allowed to customize the complete ImGuiStyle. Start
+		// every switch from the same compact Xenomods baseline so geometry from a
+		// previous theme (notably Comfy's rounding, alignment, and padding) cannot
+		// leak into the newly selected theme.
+		ImGuiStyle cleanStyle;
+		ImGui::GetStyle() = cleanStyle;
+		ImGui::StyleColorsDark();
+
+		ImGuiStyle& style = ImGui::GetStyle();
+		style.WindowPadding = ImVec2(6, 6);
+		style.FramePadding = ImVec2(2, 1);
+		style.ItemSpacing = ImVec2(8, 3);
+		style.ItemInnerSpacing = ImVec2(3, 4);
+		style.ScrollbarSize = 16;
+		style.ScrollbarRounding = 0;
+
 		switch (curTheme) {
 			case Theme::Titans: ImGuiStyleColorsXB1(); break;
 			case Theme::Alrest: ImGuiStyleColorsXB2(); break;
@@ -249,6 +277,7 @@ namespace xenomods {
 			case Theme::ImGuiLight: ImGui::StyleColorsLight(); break;
 			case Theme::ImGuiClassic: ImGui::StyleColorsClassic(); break;
 			case Theme::DougBinks: ImGuiStyleColorsDougBinks(); break;
+			case Theme::Comfy: ImGuiStyleColorsComfy(); break;
 			default: ImGui::StyleColorsDark(); return Theme::ImGuiDark;
 		}
 

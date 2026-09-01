@@ -43,6 +43,7 @@ namespace xenomods::InputBuffer {
 		};
 
 		SavedSettings lastSavedSettings {};
+		bool settingsMigrationNeeded = false;
 
 		std::string SettingsPath() {
 			return fmt::format(
@@ -57,7 +58,7 @@ namespace xenomods::InputBuffer {
 
 		void SaveSettingsIfChanged() {
 			const SavedSettings settings = CurrentSettings();
-			if(settings == lastSavedSettings)
+			if(settings == lastSavedSettings && !settingsMigrationNeeded)
 				return;
 
 			const auto path = SettingsPath();
@@ -78,13 +79,17 @@ namespace xenomods::InputBuffer {
 				file.Write(contents.c_str(), contents.size());
 				file.Flush();
 				lastSavedSettings = settings;
+				settingsMigrationNeeded = false;
 			}
 		}
 
 		std::array<std::uint8_t, 32> buttonFrames {};
 		std::uint32_t physicalHeld = 0;
+		std::uint32_t physicalNeedsReleaseMask = 0;
 		AcceptedActionCallback acceptedActionCallback = nullptr;
 		InputLayerUpdateCallback inputLayerUpdateCallback = nullptr;
+		bool inputLayerPadCaptureActive = false;
+		AutoUiActionAcceptedCallback autoUiActionAcceptedCallback = nullptr;
 		bool acceptedActionCaptureActive = false;
 		bool acceptedActionCaptureWaitingForNeutral = false;
 		bool playbackOverrideActive = false;
@@ -92,10 +97,14 @@ namespace xenomods::InputBuffer {
 		AcceptedAction playbackAction {};
 		bool playbackUiActionOffered = false;
 		bool playbackUiDirectActionOffered = false;
+		std::uint32_t scriptedBufferedMask = 0;
+		std::uint32_t scriptedUiOfferedMask = 0;
+		std::uint32_t strictRelayMask = 0;
 		constexpr std::uint32_t EncodedActionFlag = 0x80000000u;
 		constexpr std::uint32_t UiPadActionFlag = 0x40000000u;
 		constexpr std::uint32_t EncodedActionIndexMask = 0x0fffffffu;
 		constexpr std::uint32_t UiPadMask = 0x3fffffffu;
+		constexpr std::uint16_t UiSecondaryActionEvent = 8;
 		constexpr std::array<std::uint32_t, 27> UiPadToFwPad {
 			0x00000000, 0x00000004, 0x00000002, 0x00000004, 0x00000002,
 			0x00000008, 0x00000001, 0x00001000, 0x00004000, 0x00002000,
@@ -104,8 +113,15 @@ namespace xenomods::InputBuffer {
 			0x04000000, 0x02000000, 0x08000000, 0x10000000, 0x40000000,
 			0x20000000, 0x80000000
 		};
+		// UIInputLayer records navigation in two forms. Ordinary controller
+		// D-pad presses use the low FW pad bits, while list/amount widgets
+		// (including the shop quantity selector) resolve them to the UI
+		// directional actions in bits 24-27. Treat both as navigation so the
+		// action is offered to its recorded layer and completed only when that
+		// layer emits its native navigation event.
 		constexpr std::uint32_t DirectionButtonMask =
-			(1u << 12) | (1u << 13) | (1u << 14) | (1u << 15);
+			(1u << 12) | (1u << 13) | (1u << 14) | (1u << 15)
+			| (1u << 24) | (1u << 25) | (1u << 26) | (1u << 27);
 		constexpr std::uint32_t LrButtonMask =
 			(1u << 4) | (1u << 5);
 		constexpr std::uint32_t TriggerButtonMask =
@@ -124,6 +140,16 @@ namespace xenomods::InputBuffer {
 		};
 
 		std::array<LayerRegistration, 256> layerRegistrations {};
+
+		enum class AutoUiActionPhase {
+			Idle,
+			Pending,
+			Neutral
+		};
+		AutoUiActionPhase autoUiActionPhase = AutoUiActionPhase::Idle;
+		std::uint32_t autoUiActionObject = 0;
+		std::uint32_t autoUiActionMask = 0;
+		bool autoUiActionOffered = false;
 
 		void RegisterInputLayer(const void* layer, std::uint32_t handle) {
 			if(layer == nullptr || handle == 0)
@@ -176,6 +202,11 @@ namespace xenomods::InputBuffer {
 				&& ((playbackAction.input & UiPadMask) & LrButtonMask) == 0;
 		}
 
+		void CompletePlaybackAction(const AcceptedAction& action) {
+			if(acceptedActionCallback != nullptr)
+				acceptedActionCallback(action, ActionSource::Playback);
+		}
+
 		std::uint32_t EncodeAction(std::uint32_t inputType, std::uint32_t index) {
 			return EncodedActionFlag
 				| ((inputType & 7u) << 28)
@@ -209,15 +240,31 @@ namespace xenomods::InputBuffer {
 			return count <= 27 ? count : 0;
 		}
 
-		bool InputLayerAcceptsUiPadAction(const void* inputLayer) {
-			if(!IsUiPadAction(playbackAction.input))
-				return false;
+		std::uint32_t InputLayerEnabledButtonMask(const void* inputLayer) {
 			const auto bytes = reinterpret_cast<const std::uint8_t*>(inputLayer);
 			const std::uint64_t count = InputLayerEntryCount(inputLayer);
 			if(bytes == nullptr || count == 0)
+				return 0;
+
+			std::uint32_t mask = 0;
+			for(std::uint64_t index = 0; index < count; index++) {
+				const auto entry = bytes + 0x50 + index * 0x10;
+				const std::uint16_t uiPad = *reinterpret_cast<const std::uint16_t*>(entry);
+				if(uiPad < UiPadToFwPad.size() && entry[0xf] != 0)
+					mask |= UiPadToFwPad[uiPad];
+			}
+			return mask;
+		}
+
+		bool InputLayerAcceptsMask(
+			const void* inputLayer,
+			std::uint32_t inputMask
+		) {
+			const auto bytes = reinterpret_cast<const std::uint8_t*>(inputLayer);
+			const std::uint64_t count = InputLayerEntryCount(inputLayer);
+			if(bytes == nullptr || count == 0 || inputMask == 0)
 				return false;
 
-			const std::uint32_t inputMask = playbackAction.input & UiPadMask;
 			for(std::uint64_t index = 0; index < count; index++) {
 				const auto entry = bytes + 0x50 + index * 0x10;
 				const std::uint16_t uiPad = *reinterpret_cast<const std::uint16_t*>(entry);
@@ -231,6 +278,22 @@ namespace xenomods::InputBuffer {
 			return false;
 		}
 
+		bool InputLayerAcceptsUiPadAction(const void* inputLayer) {
+			return IsUiPadAction(playbackAction.input)
+				&& InputLayerAcceptsMask(
+					inputLayer,
+					playbackAction.input & UiPadMask
+				);
+		}
+
+		std::uint32_t InputLayerObject(const void* inputLayer) {
+			if(inputLayer == nullptr)
+				return 0;
+			return *reinterpret_cast<const std::uint32_t*>(
+				reinterpret_cast<const std::uint8_t*>(inputLayer) + 0x40
+			);
+		}
+
 		bool PlaybackLayerMatches(const void* inputLayer) {
 			if(inputLayer == nullptr)
 				return false;
@@ -238,9 +301,7 @@ namespace xenomods::InputBuffer {
 			if(actualLayer != 0 && actualLayer == playbackAction.layer)
 				return true;
 			const std::uint32_t inputMask = playbackAction.input & UiPadMask;
-			const std::uint32_t object = *reinterpret_cast<const std::uint32_t*>(
-				reinterpret_cast<const std::uint8_t*>(inputLayer) + 0x40
-			);
+			const std::uint32_t object = InputLayerObject(inputLayer);
 			return auxCoreAmountMenuActive
 				&& auxCoreAmountMenuObject != 0
 				&& object == auxCoreAmountMenuObject
@@ -265,6 +326,12 @@ namespace xenomods::InputBuffer {
 		bool leftStickOverrideActive = false;
 		float leftStickOverrideX = 0.f;
 		float leftStickOverrideY = 0.f;
+		bool actionLeftStickOverrideActive = false;
+		bool actionRightStickOverrideActive = false;
+		float actionLeftStickOverrideX = 0.f;
+		float actionLeftStickOverrideY = 0.f;
+		float actionRightStickOverrideX = 0.f;
+		float actionRightStickOverrideY = 0.f;
 		bool rawButtonOverrideActive = false;
 		std::uint32_t rawButtonHeld = 0;
 		std::uint32_t rawButtonDown = 0;
@@ -332,10 +399,11 @@ namespace xenomods::InputBuffer {
 				if(pad == 0)
 					physicalHeld = original;
 				if(pad == 0 && playbackOverrideActive)
-					return PlaybackButtonMask();
+					return (PlaybackButtonMask() | strictRelayMask)
+						| scriptedBufferedMask;
 				if(pad == 0 && rawButtonOverrideActive)
-					return original | rawButtonHeld;
-				return original;
+					return original | rawButtonHeld | scriptedBufferedMask;
+				return pad == 0 ? original | scriptedBufferedMask : original;
 			}
 		};
 
@@ -343,37 +411,43 @@ namespace xenomods::InputBuffer {
 			static std::uint32_t Hook(int pad) {
 				const std::uint32_t original = Orig(pad);
 				if(pad == 0 && playbackOverrideActive)
-					return PlaybackButtonMask();
+					return (PlaybackButtonMask() | strictRelayMask)
+						| scriptedBufferedMask;
 				if(pad == 0 && rawButtonOverrideActive)
-					return original | rawButtonDown;
+					return original | rawButtonDown | scriptedBufferedMask;
 				if(!Enabled || pad != 0) {
 					if(pad == 0)
 						Clear();
-					return original;
+					return pad == 0 ? original | scriptedBufferedMask : original;
 				}
 
 				for(std::size_t index = 0; index < buttonFrames.size(); index++) {
 					const std::uint32_t bit = std::uint32_t {1} << index;
 					if((physicalHeld & bit) == 0) {
 						buttonFrames[index] = 0;
-					} else if((original & bit) != 0) {
+						physicalNeedsReleaseMask &= ~bit;
+					} else if(
+						(original & bit) != 0
+						&& (physicalNeedsReleaseMask & bit) == 0
+					) {
 						buttonFrames[index] = 1;
 					}
 				}
 
-				const std::uint32_t pending = GetPendingMask();
-				return original | pending;
+				return original | GetPendingMask() | scriptedBufferedMask;
 			}
 		};
 
 		struct GetUpHook : skylaunch::hook::Trampoline<GetUpHook> {
 			static std::uint32_t Hook(int pad) {
 				const std::uint32_t original = Orig(pad);
-				if(pad == 0 && playbackOverrideActive)
+				if(pad == 0 && (playbackOverrideActive || strictRelayMask != 0))
 					return 0;
-				return pad == 0 && rawButtonOverrideActive
-					? original & ~rawButtonHeld
-					: original;
+				if(pad != 0)
+					return original;
+				const std::uint32_t heldMask = scriptedBufferedMask
+					| (rawButtonOverrideActive ? rawButtonHeld : 0);
+				return original & ~heldMask;
 			}
 		};
 
@@ -382,6 +456,8 @@ namespace xenomods::InputBuffer {
 				const float original = Orig(pad, deadzone);
 				if(pad == 0 && playbackOverrideActive)
 					return 0.f;
+				if(pad == 0 && actionLeftStickOverrideActive)
+					return actionLeftStickOverrideX;
 				if(pad == 0 && leftStickOverrideActive)
 					return leftStickOverrideX;
 				return pad == 0 ? BufferStickX(leftStick, original, BufferLeftStick) : original;
@@ -393,6 +469,8 @@ namespace xenomods::InputBuffer {
 				const float original = Orig(pad, deadzone);
 				if(pad == 0 && playbackOverrideActive)
 					return 0.f;
+				if(pad == 0 && actionLeftStickOverrideActive)
+					return actionLeftStickOverrideY;
 				if(pad == 0 && leftStickOverrideActive)
 					return leftStickOverrideY;
 				return pad == 0 ? BufferStickY(leftStick, original, BufferLeftStick) : original;
@@ -404,6 +482,8 @@ namespace xenomods::InputBuffer {
 				const float original = Orig(pad, deadzone);
 				if(pad == 0 && playbackOverrideActive)
 					return 0.f;
+				if(pad == 0 && actionRightStickOverrideActive)
+					return actionRightStickOverrideX;
 				return pad == 0 ? BufferStickX(rightStick, original, BufferRightStick) : original;
 			}
 		};
@@ -413,6 +493,8 @@ namespace xenomods::InputBuffer {
 				const float original = Orig(pad, deadzone);
 				if(pad == 0 && playbackOverrideActive)
 					return 0.f;
+				if(pad == 0 && actionRightStickOverrideActive)
+					return actionRightStickOverrideY;
 				return pad == 0 ? BufferStickY(rightStick, original, BufferRightStick) : original;
 			}
 		};
@@ -420,6 +502,15 @@ namespace xenomods::InputBuffer {
 		struct UIUtilGetPadDataHook : skylaunch::hook::Trampoline<UIUtilGetPadDataHook> {
 			static fw::PadData* Hook() {
 				fw::PadData* original = Orig();
+				if(
+					inputLayerPadCaptureActive
+					&& inputLayerUpdateCallback != nullptr
+					&& updatingInputLayer != nullptr
+					&& original != nullptr
+				) {
+					std::memcpy(&activeUiPadData, original, sizeof(activeUiPadData));
+					activeUiPadDataValid = true;
+				}
 				if(
 					acceptedActionCaptureActive
 					&& acceptedActionCaptureWaitingForNeutral
@@ -440,13 +531,55 @@ namespace xenomods::InputBuffer {
 					std::memcpy(&activeUiPadData, original, sizeof(activeUiPadData));
 					activeUiPadDataValid = true;
 				}
-				if(!playbackOverrideActive)
+				if(
+					!playbackOverrideActive
+					&& autoUiActionPhase == AutoUiActionPhase::Idle
+					&& scriptedBufferedMask == 0
+				)
 					return original;
 				static fw::PadData injected {};
 				if(original != nullptr)
 					std::memcpy(&injected, original, sizeof(injected));
 				else
 					injected = {};
+
+				if(
+					autoUiActionPhase != AutoUiActionPhase::Idle
+					&& updatingInputLayer != nullptr
+					&& InputLayerObject(updatingInputLayer) == autoUiActionObject
+				) {
+					if(autoUiActionPhase == AutoUiActionPhase::Neutral) {
+						injected.words[0] &= ~autoUiActionMask;
+						injected.words[1] &= ~autoUiActionMask;
+						injected.words[3] &= ~autoUiActionMask;
+						std::memcpy(&activeUiPadData, &injected, sizeof(activeUiPadData));
+						activeUiPadDataValid = true;
+						return &injected;
+					}
+					if(InputLayerAcceptsMask(updatingInputLayer, autoUiActionMask)) {
+						injected.words[0] |= autoUiActionMask;
+						injected.words[1] |= autoUiActionMask;
+						injected.words[3] |= autoUiActionMask;
+						autoUiActionOffered = true;
+						std::memcpy(&activeUiPadData, &injected, sizeof(activeUiPadData));
+						activeUiPadDataValid = true;
+						return &injected;
+					}
+				}
+				if(!playbackOverrideActive) {
+					if(updatingInputLayer == nullptr || scriptedBufferedMask == 0)
+						return original;
+					scriptedUiOfferedMask = scriptedBufferedMask
+						& InputLayerEnabledButtonMask(updatingInputLayer);
+					if(scriptedUiOfferedMask == 0)
+						return original;
+					injected.words[0] |= scriptedUiOfferedMask;
+					injected.words[1] |= scriptedUiOfferedMask;
+					injected.words[3] |= scriptedUiOfferedMask;
+					std::memcpy(&activeUiPadData, &injected, sizeof(activeUiPadData));
+					activeUiPadDataValid = true;
+					return &injected;
+				}
 
 				injected.words[0] = 0;
 				injected.words[1] = 0;
@@ -475,15 +608,12 @@ namespace xenomods::InputBuffer {
 
 		struct UIInputLayerUpdateHook : skylaunch::hook::Trampoline<UIInputLayerUpdateHook> {
 			static bool Hook(void* inputLayer) {
-				std::uint32_t object = 0;
-				std::uint32_t layerHandle = 0;
+				const std::uint32_t object = InputLayerObject(inputLayer);
+				const std::uint32_t layerHandle = InputLayerHandle(inputLayer);
 				if(inputLayerUpdateCallback != nullptr && inputLayer != nullptr) {
-					object = *reinterpret_cast<const std::uint32_t*>(
-						reinterpret_cast<const std::uint8_t*>(inputLayer) + 0x40
-					);
-					layerHandle = InputLayerHandle(inputLayer);
 					inputLayerUpdateCallback(
-						object, inputLayer, layerHandle, false, false, 0, 0, 0
+						object, inputLayer, layerHandle, false, false,
+						0, 0, 0, 0, 0
 					);
 				}
 				void* previousInputLayer = updatingInputLayer;
@@ -491,11 +621,19 @@ namespace xenomods::InputBuffer {
 				activeUiPadDataValid = false;
 				playbackUiActionOffered = false;
 				playbackUiDirectActionOffered = false;
+				autoUiActionOffered = false;
+				scriptedUiOfferedMask = 0;
 				const bool accepted = Orig(inputLayer);
 				const bool offeredPlaybackAction = playbackUiActionOffered;
 				const bool offeredDirectAction = playbackUiDirectActionOffered;
 				const std::uint16_t emittedEvent = *reinterpret_cast<const std::uint16_t*>(
 					reinterpret_cast<const std::uint8_t*>(inputLayer) + 0x10
+				);
+				const std::uint16_t secondaryEvent = *reinterpret_cast<const std::uint16_t*>(
+					reinterpret_cast<const std::uint8_t*>(inputLayer) + 0x28
+				);
+				const std::uint32_t secondaryAction = *reinterpret_cast<const std::uint32_t*>(
+					reinterpret_cast<const std::uint8_t*>(inputLayer) + 0x34
 				);
 				if(inputLayerUpdateCallback != nullptr && inputLayer != nullptr) {
 					inputLayerUpdateCallback(
@@ -505,11 +643,36 @@ namespace xenomods::InputBuffer {
 						true,
 						accepted,
 						emittedEvent,
+						secondaryEvent,
+						secondaryAction,
 						activeUiPadDataValid ? activeUiPadData.words[1] : 0,
 						activeUiPadDataValid ? activeUiPadData.words[3] : 0
 					);
 				}
 				updatingInputLayer = previousInputLayer;
+
+				if(
+					autoUiActionPhase == AutoUiActionPhase::Neutral
+					&& object == autoUiActionObject
+				) {
+					autoUiActionPhase = AutoUiActionPhase::Idle;
+					autoUiActionObject = 0;
+					autoUiActionMask = 0;
+				}
+				if(
+					autoUiActionPhase == AutoUiActionPhase::Pending
+					&& autoUiActionOffered
+					&& accepted
+					&& object == autoUiActionObject
+					&& secondaryEvent == UiSecondaryActionEvent
+					&& secondaryAction == 1
+				) {
+					autoUiActionPhase = AutoUiActionPhase::Neutral;
+					if(autoUiActionAcceptedCallback != nullptr)
+						autoUiActionAcceptedCallback(object, layerHandle);
+				}
+				if(accepted && scriptedUiOfferedMask != 0)
+					scriptedBufferedMask &= ~scriptedUiOfferedMask;
 
 				if(
 					accepted
@@ -542,8 +705,7 @@ namespace xenomods::InputBuffer {
 				) {
 					AcceptedAction acceptedAction = playbackAction;
 					playbackAction = {};
-					if(acceptedActionCallback != nullptr)
-						acceptedActionCallback(acceptedAction, ActionSource::Playback);
+					CompletePlaybackAction(acceptedAction);
 				}
 				return accepted;
 			}
@@ -560,6 +722,23 @@ namespace xenomods::InputBuffer {
 					&& *reinterpret_cast<const std::uint32_t*>(
 						reinterpret_cast<const std::uint8_t*>(action) + 8
 					) != 0;
+				if(
+					scriptedBufferedMask != 0
+					&& updatingInputLayer == nullptr
+					&& descriptorValid && resourceEnabled
+					&& descriptor[1] < 32
+				) {
+					const std::uint32_t bit = std::uint32_t {1} << descriptor[1];
+					if((scriptedBufferedMask & bit) != 0) {
+						const std::uint32_t previousRelayMask = strictRelayMask;
+						strictRelayMask = previousRelayMask | bit;
+						const bool accepted = Orig(relay, action);
+						strictRelayMask = previousRelayMask;
+						if(accepted)
+							scriptedBufferedMask &= ~bit;
+						return accepted;
+					}
+				}
 				const std::uint32_t playbackUiMask = playbackAction.input & UiPadMask;
 				const bool playbackUiDirection =
 					(playbackUiMask & DirectionButtonMask) != 0;
@@ -574,6 +753,7 @@ namespace xenomods::InputBuffer {
 				// inputs. Keep every non-L/R action on native layer acceptance for the
 				// rest of this Aux sequence; L/R retains its direct handler exception.
 				const bool playbackUiRelayType = descriptorValid
+					&& playbackMode == PlaybackMode::StandardMenu
 					&& !auxCoreAmountPlaybackAction
 					&& !auxCoreNativePlaybackAction
 					&& !playbackUiDirection
@@ -593,8 +773,7 @@ namespace xenomods::InputBuffer {
 				) {
 					const AcceptedAction acceptedAction = playbackAction;
 					playbackAction = {};
-					if(acceptedActionCallback != nullptr)
-						acceptedActionCallback(acceptedAction, ActionSource::Playback);
+					CompletePlaybackAction(acceptedAction);
 					return true;
 				}
 
@@ -616,8 +795,7 @@ namespace xenomods::InputBuffer {
 					) {
 						const AcceptedAction acceptedAction = playbackAction;
 						playbackAction = {};
-						if(acceptedActionCallback != nullptr)
-							acceptedActionCallback(acceptedAction, ActionSource::Playback);
+						CompletePlaybackAction(acceptedAction);
 						return true;
 					}
 					return false;
@@ -638,8 +816,7 @@ namespace xenomods::InputBuffer {
 					) {
 						const AcceptedAction acceptedAction = playbackAction;
 						playbackAction = {};
-						if(acceptedActionCallback != nullptr)
-							acceptedActionCallback(acceptedAction, ActionSource::Playback);
+						CompletePlaybackAction(acceptedAction);
 					}
 					if(Enabled && (GetPendingMask() & bit) != 0)
 						Consume(bit);
@@ -668,10 +845,13 @@ namespace xenomods::InputBuffer {
 				ReleaseInputLayer(handle);
 			}
 		};
+
 	} // namespace
 
 	void Clear() {
 		buttonFrames.fill(0);
+		physicalNeedsReleaseMask = 0;
+		strictRelayMask = 0;
 		leftStick = {};
 		rightStick = {};
 	}
@@ -686,10 +866,57 @@ namespace xenomods::InputBuffer {
 		leftStickOverrideY = active ? std::clamp(y, -1.f, 1.f) : 0.f;
 	}
 
-	void SetRawButtonOverride(bool active, std::uint32_t heldMask, bool down) {
+	void SetActionStickOverride(bool active, bool rightStick, float x, float y) {
+		if(!active) {
+			actionLeftStickOverrideActive = false;
+			actionRightStickOverrideActive = false;
+			actionLeftStickOverrideX = 0.f;
+			actionLeftStickOverrideY = 0.f;
+			actionRightStickOverrideX = 0.f;
+			actionRightStickOverrideY = 0.f;
+			return;
+		}
+		if(rightStick) {
+			actionRightStickOverrideActive = true;
+			actionRightStickOverrideX = std::clamp(x, -1.f, 1.f);
+			actionRightStickOverrideY = std::clamp(y, -1.f, 1.f);
+		} else {
+			actionLeftStickOverrideActive = true;
+			actionLeftStickOverrideX = std::clamp(x, -1.f, 1.f);
+			actionLeftStickOverrideY = std::clamp(y, -1.f, 1.f);
+		}
+	}
+
+	void SetRawButtonOverride(
+		bool active,
+		std::uint32_t heldMask,
+		std::uint32_t downMask
+	) {
 		rawButtonOverrideActive = active && heldMask != 0;
 		rawButtonHeld = rawButtonOverrideActive ? heldMask : 0;
-		rawButtonDown = rawButtonOverrideActive && down ? heldMask : 0;
+		rawButtonDown = rawButtonOverrideActive ? downMask & heldMask : 0;
+	}
+
+	void SetBufferedButtonAction(std::uint32_t inputMask) {
+		scriptedBufferedMask |= inputMask & UiPadMask;
+		// Targeting Actions are field inputs. Do not offer them through arbitrary
+		// UIInputLayers: an unrelated layer can report success and swallow the
+		// press before the field handler observes it. The matching enabled
+		// PadRelay action is the native acceptance point for this buffer.
+		scriptedUiOfferedMask = 0;
+	}
+
+	void CancelBufferedButtonAction() {
+		scriptedBufferedMask = 0;
+		scriptedUiOfferedMask = 0;
+	}
+
+	bool BufferedButtonActionPending() {
+		return scriptedBufferedMask != 0;
+	}
+
+	std::uint32_t BufferedButtonActionPendingMask() {
+		return scriptedBufferedMask;
 	}
 
 	void SetAcceptedActionCallback(AcceptedActionCallback callback) {
@@ -698,6 +925,40 @@ namespace xenomods::InputBuffer {
 
 	void SetInputLayerUpdateCallback(InputLayerUpdateCallback callback) {
 		inputLayerUpdateCallback = callback;
+	}
+
+	void SetInputLayerPadCapture(bool active) {
+		inputLayerPadCaptureActive = active;
+		if(!active)
+			activeUiPadDataValid = false;
+	}
+
+	void SetAutoUiActionAcceptedCallback(AutoUiActionAcceptedCallback callback) {
+		autoUiActionAcceptedCallback = callback;
+	}
+
+	void RequestAutoUiAction(std::uint32_t object, std::uint32_t inputMask) {
+		inputMask &= UiPadMask;
+		if(object == 0 || inputMask == 0)
+			return;
+		if(
+			autoUiActionPhase != AutoUiActionPhase::Idle
+			&& autoUiActionObject == object
+			&& autoUiActionMask == inputMask
+		)
+			return;
+		autoUiActionObject = object;
+		autoUiActionMask = inputMask;
+		autoUiActionPhase = AutoUiActionPhase::Pending;
+	}
+
+	void CancelAutoUiAction(std::uint32_t object) {
+		if(object != 0 && autoUiActionObject != object)
+			return;
+		autoUiActionPhase = AutoUiActionPhase::Idle;
+		autoUiActionObject = 0;
+		autoUiActionMask = 0;
+		autoUiActionOffered = false;
 	}
 
 	void SetAcceptedActionCapture(bool active) {
@@ -722,7 +983,9 @@ namespace xenomods::InputBuffer {
 	}
 
 	void SetPlaybackAction(AcceptedAction action) {
-		playbackAction = playbackOverrideActive ? action : AcceptedAction {};
+		if(!playbackOverrideActive)
+			return;
+		playbackAction = action;
 	}
 
 	bool PlaybackActionPending() {
@@ -751,8 +1014,7 @@ namespace xenomods::InputBuffer {
 		const AcceptedAction acceptedAction = playbackAction;
 		auxCoreNativeAcceptanceActive = true;
 		playbackAction = {};
-		if(acceptedActionCallback != nullptr)
-			acceptedActionCallback(acceptedAction, ActionSource::Playback);
+		CompletePlaybackAction(acceptedAction);
 		return true;
 	}
 
@@ -774,7 +1036,7 @@ namespace xenomods::InputBuffer {
 	}
 
 	void DrawMenu() {
-		if(ImGui::Checkbox("Enable input buffering", &Enabled) && !Enabled)
+		if(ImGui::Checkbox("Enable input buffering", &Enabled))
 			Clear();
 		ImGui::PushItemWidth(120.f);
 		ImGui::Checkbox("Buffer left-stick flicks", &BufferLeftStick);
@@ -792,6 +1054,7 @@ namespace xenomods::InputBuffer {
 		if(settings) {
 			const auto inputBuffer = settings["input_buffer"];
 			Enabled = inputBuffer["enabled"].value_or(false);
+			settingsMigrationNeeded = inputBuffer["true_enabled"].node() != nullptr;
 		}
 		lastSavedSettings = CurrentSettings();
 

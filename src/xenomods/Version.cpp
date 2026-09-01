@@ -7,7 +7,7 @@
 #include "skylaunch/nx/kernel/svc.h"
 
 namespace xenomods::version {
-	static constexpr const char* InternalVersion = "v1.2.2";
+	static constexpr const char* InternalVersion = "v1.3.0";
 
 	const char* BuildGitVersion() {
 		return InternalVersion;

@@ -1,6 +1,7 @@
 #include "Targeting.hpp"
 
 #include "CameraTools.hpp"
+#include "AutoCutsceneSkips.hpp"
 #include "DebugStuff.hpp"
 #include "MenuHelper.hpp"
 #include "PlayerMovement.hpp"
@@ -11,9 +12,9 @@
 #include <cctype>
 #include <cmath>
 #include <cstring>
-#include <deque>
 #include <limits>
 #include <sstream>
+#include <unordered_map>
 
 #include <fmt/format.h>
 #include <imgui.h>
@@ -41,21 +42,36 @@ namespace xenomods {
 
 	namespace {
 		int activeTargetIndex = -1;
+		int selectedTargetIndex = -1;
 		bool waitingForPlayer = false;
 		int startDelayFrames = 0;
 		int activeDelayIndex = -1;
 		int delayFramesRemaining = 0;
-		int activeActionIndex = -1;
-		int actionDelayFramesRemaining = 0;
-		int actionHoldFramesRemaining = 0;
-		bool actionHoldStarted = false;
-		std::deque<int> queuedActionIndices;
+		struct ActiveAction {
+			int index = -1;
+			int delayFramesRemaining = 0;
+			int holdFramesRemaining = 0;
+			bool started = false;
+			bool bufferedRequested = false;
+			bool bufferedAccepted = false;
+		};
+		std::vector<ActiveAction> activeActions;
 		int trackedTargetIndex = -1;
 		glm::vec3 previousTargetDelta {};
 		bool hasPreviousTargetDelta = false;
 		bool targetingMenuTasPlayback = false;
+		std::uint64_t scriptFrameCount = 0;
+		std::uint64_t bestScriptFrames = 0;
+		bool scriptTimerRunning = false;
+		bool scriptMovementComplete = false;
+		std::uint64_t targetToTargetFrameCount = 0;
+		bool targetToTargetTimerRunning = false;
+		int targetToTargetOriginIndex = -1;
+		int mostRecentTargetToTargetOriginIndex = -1;
+		bool inspectSelectedSplit = false;
 		std::string lastSavedTargets;
 		std::string currentRouteFile = "targets0.toml";
+		bool currentRouteWasCreatedEmpty = false;
 		std::vector<std::string> routeFiles;
 		std::string routeFileError;
 		std::string lastSavedRouteSetting;
@@ -69,27 +85,28 @@ namespace xenomods {
 			std::uint32_t mask;
 		};
 
-		constexpr std::array<ButtonChoice, 18> ButtonChoices {{
-			{"A", 1u << static_cast<unsigned>(nn::hid::NpadButton::A)},
-			{"B", 1u << static_cast<unsigned>(nn::hid::NpadButton::B)},
-			{"X", 1u << static_cast<unsigned>(nn::hid::NpadButton::X)},
-			{"Y", 1u << static_cast<unsigned>(nn::hid::NpadButton::Y)},
-			{"L", 1u << static_cast<unsigned>(nn::hid::NpadButton::L)},
-			{"R", 1u << static_cast<unsigned>(nn::hid::NpadButton::R)},
-			{"ZL", 1u << static_cast<unsigned>(nn::hid::NpadButton::ZL)},
-			{"ZR", 1u << static_cast<unsigned>(nn::hid::NpadButton::ZR)},
-			{"Plus", 1u << static_cast<unsigned>(nn::hid::NpadButton::Plus)},
-			{"Minus", 1u << static_cast<unsigned>(nn::hid::NpadButton::Minus)},
-			{"Stick L", 1u << static_cast<unsigned>(nn::hid::NpadButton::StickL)},
-			{"Stick R", 1u << static_cast<unsigned>(nn::hid::NpadButton::StickR)},
-			{"D-pad Up", 1u << static_cast<unsigned>(nn::hid::NpadButton::Up)},
-			{"D-pad Down", 1u << static_cast<unsigned>(nn::hid::NpadButton::Down)},
-			{"D-pad Left", 1u << static_cast<unsigned>(nn::hid::NpadButton::Left)},
-			{"D-pad Right", 1u << static_cast<unsigned>(nn::hid::NpadButton::Right)},
-			{"SL", (1u << static_cast<unsigned>(nn::hid::NpadButton::LeftSL))
-				| (1u << static_cast<unsigned>(nn::hid::NpadButton::RightSL))},
-			{"SR", (1u << static_cast<unsigned>(nn::hid::NpadButton::LeftSR))
-				| (1u << static_cast<unsigned>(nn::hid::NpadButton::RightSR))}
+		// Targeting Actions are injected into XC2's fw::PadData/ml::DevPad path.
+		// These are the game's physical pad masks, not nn::hid::NpadButton bit
+		// positions. Keeping that distinction here is essential: for example,
+		// Npad Plus (1 << 10) is XC2's Stick L bit, while physical Plus is 0x200.
+		constexpr std::uint32_t PhysicalA = 0x00000004u;
+		constexpr std::array<ButtonChoice, 16> ButtonChoices {{
+			{"A", PhysicalA},
+			{"B", 0x00000002u},
+			{"X", 0x00000008u},
+			{"Y", 0x00000001u},
+			{"L", 0x00000010u},
+			{"R", 0x00000040u},
+			{"ZL", 0x00000080u},
+			{"ZR", 0x00000800u},
+			{"Plus", 0x00000200u},
+			{"Minus", 0x00000100u},
+			{"Stick L", 0x00000400u},
+			{"Stick R", 0x00000020u},
+			{"D-pad Up", 0x00002000u},
+			{"D-pad Down", 0x00008000u},
+			{"D-pad Left", 0x00001000u},
+			{"D-pad Right", 0x00004000u}
 		}};
 
 		std::string ActionName(std::uint32_t mask) {
@@ -104,6 +121,14 @@ namespace xenomods {
 			return name.empty() ? "<select input>" : name;
 		}
 
+		std::string ActionName(const Targeting::TargetData& action) {
+			if(action.actionInputType == Targeting::ActionInputType::LeftStick)
+				return fmt::format("L Stick X {:.2f} Y {:.2f}", action.stickX, action.stickY);
+			if(action.actionInputType == Targeting::ActionInputType::RightStick)
+				return fmt::format("R Stick X {:.2f} Y {:.2f}", action.stickX, action.stickY);
+			return ActionName(action.buttonMask);
+		}
+
 		void ResetTargetApproach() {
 			trackedTargetIndex = -1;
 			previousTargetDelta = {};
@@ -111,82 +136,113 @@ namespace xenomods {
 		}
 
 		void ClearActiveActions() {
-			activeActionIndex = -1;
-			actionDelayFramesRemaining = 0;
-			actionHoldFramesRemaining = 0;
-			actionHoldStarted = false;
-			queuedActionIndices.clear();
+			activeActions.clear();
 			InputBuffer::SetRawButtonOverride(false);
-		}
-
-		void LoadAction(int index) {
-			activeActionIndex = index;
-			const auto& action = Targeting::Targets[index];
-			actionDelayFramesRemaining = std::max(0, action.delayFrames);
-			actionHoldFramesRemaining = std::max(1, action.holdFrames);
-			actionHoldStarted = false;
+			InputBuffer::SetActionStickOverride(false);
+			InputBuffer::CancelBufferedButtonAction();
 		}
 
 		void QueueAction(int index) {
-			if(activeActionIndex < 0)
-				LoadAction(index);
-			else
-				queuedActionIndices.push_back(index);
-		}
-
-		void AdvanceActionQueue() {
-			InputBuffer::SetRawButtonOverride(false);
-			if(queuedActionIndices.empty()) {
-				activeActionIndex = -1;
-				actionDelayFramesRemaining = 0;
-				actionHoldFramesRemaining = 0;
-				actionHoldStarted = false;
+			if(index < 0 || index >= static_cast<int>(Targeting::Targets.size()))
 				return;
-			}
-			const int next = queuedActionIndices.front();
-			queuedActionIndices.pop_front();
-			LoadAction(next);
+			const auto& action = Targeting::Targets[index];
+			activeActions.push_back({
+				.index = index,
+				.delayFramesRemaining = std::max(0, action.delayFrames),
+				.holdFramesRemaining = std::max(1, action.holdFrames)
+			});
 		}
 
 		void UpdateActiveAction(bool controlFree) {
-			if(
-				activeActionIndex < 0
-				|| activeActionIndex >= static_cast<int>(Targeting::Targets.size())
-			) {
-				InputBuffer::SetRawButtonOverride(false);
-				return;
-			}
+			std::uint32_t heldButtons = 0;
+			std::uint32_t downButtons = 0;
+			bool leftStickActive = false;
+			bool rightStickActive = false;
+			float leftX = 0.f;
+			float leftY = 0.f;
+			float rightX = 0.f;
+			float rightY = 0.f;
 
-			if(actionHoldStarted && actionHoldFramesRemaining <= 0)
-				AdvanceActionQueue();
-			if(activeActionIndex < 0)
-				return;
-
-			const auto& action = Targeting::Targets[activeActionIndex];
-			if(!actionHoldStarted) {
-				InputBuffer::SetRawButtonOverride(false);
-				if(!controlFree)
-					return;
-				if(actionDelayFramesRemaining > 0) {
-					actionDelayFramesRemaining--;
-					return;
+			const std::uint32_t pendingBuffered =
+				InputBuffer::BufferedButtonActionPendingMask();
+			for(auto& runtime : activeActions) {
+				if(
+					runtime.index < 0
+					|| runtime.index >= static_cast<int>(Targeting::Targets.size())
+				)
+					continue;
+				const auto& action = Targeting::Targets[runtime.index];
+				if(!runtime.started) {
+					const bool bufferedButtonAction =
+						action.actionInputType == Targeting::ActionInputType::Buttons
+						&& action.buffered;
+					if(!controlFree && !bufferedButtonAction)
+						continue;
+					if(runtime.delayFramesRemaining > 0) {
+						runtime.delayFramesRemaining--;
+						continue;
+					}
+					runtime.started = true;
 				}
-				actionHoldStarted = true;
+
+				if(action.actionInputType == Targeting::ActionInputType::Buttons) {
+					if(action.buffered && !runtime.bufferedAccepted) {
+						if(!runtime.bufferedRequested) {
+							InputBuffer::SetBufferedButtonAction(action.buttonMask);
+							runtime.bufferedRequested = true;
+							continue;
+						}
+						if((pendingBuffered & action.buttonMask) != 0)
+							continue;
+						runtime.bufferedAccepted = true;
+						runtime.holdFramesRemaining--;
+						if(runtime.holdFramesRemaining <= 0)
+							continue;
+					}
+					heldButtons |= action.buttonMask;
+					if(runtime.holdFramesRemaining == std::max(1, action.holdFrames))
+						downButtons |= action.buttonMask;
+					runtime.holdFramesRemaining--;
+				} else if(action.actionInputType == Targeting::ActionInputType::LeftStick) {
+					leftStickActive = true;
+					leftX = action.stickX;
+					leftY = action.stickY;
+					runtime.holdFramesRemaining--;
+				} else {
+					rightStickActive = true;
+					rightX = action.stickX;
+					rightY = action.stickY;
+					runtime.holdFramesRemaining--;
+				}
 			}
 
-			const bool firstFrame =
-				actionHoldFramesRemaining == std::max(1, action.holdFrames);
+			std::erase_if(activeActions, [](const ActiveAction& runtime) {
+				return runtime.index < 0
+					|| runtime.index >= static_cast<int>(Targeting::Targets.size())
+					|| runtime.holdFramesRemaining <= 0;
+			});
 			InputBuffer::SetRawButtonOverride(
-				true,
-				action.buttonMask,
-				firstFrame
+				heldButtons != 0,
+				heldButtons,
+				downButtons
 			);
-			actionHoldFramesRemaining--;
+			InputBuffer::SetActionStickOverride(false);
+			if(leftStickActive)
+				InputBuffer::SetActionStickOverride(true, false, leftX, leftY);
+			if(rightStickActive)
+				InputBuffer::SetActionStickOverride(true, true, rightX, rightY);
+			if(activeActions.empty())
+				InputBuffer::CancelBufferedButtonAction();
 		}
 
 		bool IsMenuTasStep(const Targeting::TargetData& target) {
 			return target.type == Targeting::TargetType::MenuTas
 				|| target.type == Targeting::TargetType::TravelTas;
+		}
+
+		bool IsMovementTarget(const Targeting::TargetData& target) {
+			return target.type == Targeting::TargetType::Position
+				|| (IsMenuTasStep(target) && !target.intermediate);
 		}
 
 		bool StartMenuTasStep(const Targeting::TargetData& target) {
@@ -205,6 +261,52 @@ namespace xenomods {
 			return std::isfinite(value.x)
 				&& std::isfinite(value.y)
 				&& std::isfinite(value.z);
+		}
+
+		void SaveTargetsIfChanged();
+
+		void MarkRouteMovementComplete() {
+			Targeting::RouteActive = false;
+			activeTargetIndex = -1;
+			waitingForPlayer = false;
+			startDelayFrames = 0;
+			activeDelayIndex = -1;
+			delayFramesRemaining = 0;
+			ResetTargetApproach();
+			InputBuffer::SetLeftStickOverride(false);
+			scriptMovementComplete = true;
+			targetToTargetTimerRunning = false;
+		}
+
+		void TryCompleteScriptTimer() {
+			if(!scriptTimerRunning || !scriptMovementComplete)
+				return;
+			if(
+				!activeActions.empty()
+				|| targetingMenuTasPlayback
+				|| MenuHelper::IsPlaybackPendingOrActive()
+			)
+				return;
+
+			scriptTimerRunning = false;
+			if(
+				scriptFrameCount > 0
+				&& (bestScriptFrames == 0 || scriptFrameCount < bestScriptFrames)
+			) {
+				bestScriptFrames = scriptFrameCount;
+				SaveTargetsIfChanged();
+				g_Logger->ToastInfo(
+					"targeting",
+					"Script complete: {}f (new best)",
+					scriptFrameCount
+				);
+			} else {
+				g_Logger->ToastInfo(
+					"targeting",
+					"Script complete: {}f",
+					scriptFrameCount
+				);
+			}
 		}
 
 		bool DrawPreciseCoordinate(const char* axis, float& value) {
@@ -232,6 +334,7 @@ namespace xenomods {
 		}
 
 		bool WriteTargetsFile(const std::string& path, const std::string& contents);
+		bool NormalizeTargetNames(std::vector<Targeting::TargetData>& targets);
 
 		std::string LegacyTargetsPath() {
 			return fmt::format(
@@ -258,6 +361,17 @@ namespace xenomods {
 			return fmt::format("{}/{}.backup.toml", TargetsDirectory(), stem);
 		}
 
+		std::string TargetNamesMigrationBackupPath() {
+			std::string stem = currentRouteFile;
+			if(stem.size() >= 5 && stem.ends_with(".toml"))
+				stem.resize(stem.size() - 5);
+			return fmt::format(
+				"{}/{}.pre-autoname.backup.toml",
+				TargetsDirectory(),
+				stem
+			);
+		}
+
 		std::string TargetingSettingsPath() {
 			return fmt::format(
 				XENOMODS_CONFIG_PATH "/{}/targetingSettings.toml",
@@ -278,6 +392,71 @@ namespace xenomods {
 			return value.size() > 5
 				&& value.ends_with(".toml")
 				&& !value.ends_with(".backup.toml");
+		}
+
+		bool NaturalRouteFileLess(const std::string& left, const std::string& right) {
+			std::size_t leftIndex = 0;
+			std::size_t rightIndex = 0;
+			while(leftIndex < left.size() && rightIndex < right.size()) {
+				const bool leftDigit = std::isdigit(
+					static_cast<unsigned char>(left[leftIndex])
+				) != 0;
+				const bool rightDigit = std::isdigit(
+					static_cast<unsigned char>(right[rightIndex])
+				) != 0;
+				if(leftDigit && rightDigit) {
+					const std::size_t leftRunStart = leftIndex;
+					const std::size_t rightRunStart = rightIndex;
+					while(leftIndex < left.size() && left[leftIndex] == '0')
+						leftIndex++;
+					while(rightIndex < right.size() && right[rightIndex] == '0')
+						rightIndex++;
+					const std::size_t leftValueStart = leftIndex;
+					const std::size_t rightValueStart = rightIndex;
+					while(
+						leftIndex < left.size()
+						&& std::isdigit(static_cast<unsigned char>(left[leftIndex]))
+					)
+						leftIndex++;
+					while(
+						rightIndex < right.size()
+						&& std::isdigit(static_cast<unsigned char>(right[rightIndex]))
+					)
+						rightIndex++;
+					const std::size_t leftDigits = leftIndex - leftValueStart;
+					const std::size_t rightDigits = rightIndex - rightValueStart;
+					if(leftDigits != rightDigits)
+						return leftDigits < rightDigits;
+					const int valueOrder = left.compare(
+						leftValueStart,
+						leftDigits,
+						right,
+						rightValueStart,
+						rightDigits
+					);
+					if(valueOrder != 0)
+						return valueOrder < 0;
+					const std::size_t leftRunLength = leftIndex - leftRunStart;
+					const std::size_t rightRunLength = rightIndex - rightRunStart;
+					if(leftRunLength != rightRunLength)
+						return leftRunLength < rightRunLength;
+					continue;
+				}
+
+				const unsigned char leftCharacter = static_cast<unsigned char>(
+					std::tolower(static_cast<unsigned char>(left[leftIndex]))
+				);
+				const unsigned char rightCharacter = static_cast<unsigned char>(
+					std::tolower(static_cast<unsigned char>(right[rightIndex]))
+				);
+				if(leftCharacter != rightCharacter)
+					return leftCharacter < rightCharacter;
+				leftIndex++;
+				rightIndex++;
+			}
+			if(leftIndex != left.size() || rightIndex != right.size())
+				return leftIndex == left.size();
+			return left < right;
 		}
 
 		void RescanRouteFiles() {
@@ -305,7 +484,7 @@ namespace xenomods {
 				if(IsRouteFile(entries[index].name))
 					routeFiles.emplace_back(entries[index].name);
 			}
-			std::sort(routeFiles.begin(), routeFiles.end());
+			std::sort(routeFiles.begin(), routeFiles.end(), NaturalRouteFileLess);
 		}
 
 		void SaveRouteSettingIfChanged() {
@@ -328,6 +507,8 @@ namespace xenomods {
 					type = "delay";
 				else if(target.type == Targeting::TargetType::Action)
 					type = "action";
+				else if(target.type == Targeting::TargetType::Toggle)
+					type = "toggle";
 				else if(target.type == Targeting::TargetType::ShopTas)
 					type = "shop_tas";
 				else if(target.type == Targeting::TargetType::MenuTas)
@@ -340,16 +521,48 @@ namespace xenomods {
 				if(target.type == Targeting::TargetType::Delay) {
 					entry.emplace("frames", std::max(0, target.delayFrames));
 				} else if(target.type == Targeting::TargetType::Action) {
+					const char* inputType = "buttons";
+					if(target.actionInputType == Targeting::ActionInputType::LeftStick)
+						inputType = "left_stick";
+					else if(target.actionInputType == Targeting::ActionInputType::RightStick)
+						inputType = "right_stick";
+					entry.emplace("input_type", inputType);
 					toml::array buttons;
 					for(const auto& choice : ButtonChoices) {
 						if((target.buttonMask & choice.mask) != 0)
 							buttons.emplace_back(choice.name);
 					}
 					entry.emplace("buttons", std::move(buttons));
+					entry.emplace(
+						"stick",
+						toml::array {target.stickX, target.stickY}
+					);
 					entry.emplace("delay_frames", std::max(0, target.delayFrames));
 					entry.emplace("hold_frames", std::max(1, target.holdFrames));
+					entry.emplace("buffer", target.buffered);
+				} else if(target.type == Targeting::TargetType::Toggle) {
+					entry.emplace("setting", std::string("auto_cutscene_skips"));
+					entry.emplace("enabled", target.toggleEnabled);
 				} else if(target.type == Targeting::TargetType::Position) {
 					entry.emplace("name", target.name);
+					entry.emplace(
+						"last_frames",
+						static_cast<std::int64_t>(std::min<std::uint64_t>(
+							target.lastFrames,
+							static_cast<std::uint64_t>(
+								std::numeric_limits<std::int64_t>::max()
+							)
+						))
+					);
+					entry.emplace(
+						"best_frames",
+						static_cast<std::int64_t>(std::min<std::uint64_t>(
+							target.bestFrames,
+							static_cast<std::uint64_t>(
+								std::numeric_limits<std::int64_t>::max()
+							)
+						))
+					);
 					entry.emplace(
 						"position",
 						toml::array {
@@ -364,6 +577,24 @@ namespace xenomods {
 						target.type == Targeting::TargetType::MenuTas
 						|| target.type == Targeting::TargetType::TravelTas
 					) {
+						entry.emplace(
+							"last_frames",
+							static_cast<std::int64_t>(std::min<std::uint64_t>(
+								target.lastFrames,
+								static_cast<std::uint64_t>(
+									std::numeric_limits<std::int64_t>::max()
+								)
+							))
+						);
+						entry.emplace(
+							"best_frames",
+							static_cast<std::int64_t>(std::min<std::uint64_t>(
+								target.bestFrames,
+								static_cast<std::uint64_t>(
+									std::numeric_limits<std::int64_t>::max()
+								)
+							))
+						);
 						entry.emplace("intermediate", target.intermediate);
 						entry.emplace(
 							"position",
@@ -379,6 +610,13 @@ namespace xenomods {
 			}
 
 			toml::table root;
+			root.emplace(
+				"best_frames",
+				static_cast<std::int64_t>(std::min<std::uint64_t>(
+					bestScriptFrames,
+					static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())
+				))
+			);
 			root.emplace("targets", std::move(allTargets));
 			std::stringstream stream;
 			stream << root;
@@ -401,6 +639,7 @@ namespace xenomods {
 		}
 
 		void SaveTargetsIfChanged() {
+			NormalizeTargetNames(Targeting::Targets);
 			const std::string contents = SerializeTargets();
 			if(contents == lastSavedTargets)
 				return;
@@ -430,6 +669,79 @@ namespace xenomods {
 			return WriteTargetsFile(destination, contents);
 		}
 
+		bool NormalizeTargetNames(std::vector<Targeting::TargetData>& targets) {
+			std::unordered_map<unsigned short, int> mapOrdinals;
+			bool changed = false;
+			for(auto& target : targets) {
+				if(target.type != Targeting::TargetType::Position)
+					continue;
+				const int ordinal = ++mapOrdinals[target.mapId];
+				const std::string mapName = target.mapName.empty()
+					? "Unknown"
+					: target.mapName;
+				const std::string canonicalName = fmt::format(
+					"{} Target {}",
+					mapName,
+					ordinal
+				);
+				if(target.name != canonicalName) {
+					target.name = canonicalName;
+					changed = true;
+				}
+			}
+			return changed;
+		}
+
+		std::vector<int> MapEntryIndices(unsigned short mapId) {
+			std::vector<int> indices;
+			for(int index = 0; index < static_cast<int>(Targeting::Targets.size()); index++) {
+				if(Targeting::Targets[index].mapId == mapId)
+					indices.push_back(index);
+			}
+			return indices;
+		}
+
+		int InsertionIndexAfterTargetBlock(unsigned short mapId, int selectedIndex) {
+			const auto mapIndices = MapEntryIndices(mapId);
+			if(mapIndices.empty())
+				return static_cast<int>(Targeting::Targets.size());
+
+			const auto selected = std::find(
+				mapIndices.begin(),
+				mapIndices.end(),
+				selectedIndex
+			);
+			if(selected == mapIndices.end())
+				return mapIndices.back() + 1;
+
+			const int selectedLogical = static_cast<int>(selected - mapIndices.begin());
+			int blockStart = selectedLogical;
+			while(
+				blockStart >= 0
+				&& Targeting::Targets[mapIndices[blockStart]].type
+					!= Targeting::TargetType::Position
+			)
+				blockStart--;
+
+			if(blockStart < 0) {
+				const int nextLogical = selectedLogical + 1;
+				return nextLogical < static_cast<int>(mapIndices.size())
+					? mapIndices[nextLogical]
+					: mapIndices.back() + 1;
+			}
+
+			int nextBlock = blockStart + 1;
+			while(
+				nextBlock < static_cast<int>(mapIndices.size())
+				&& Targeting::Targets[mapIndices[nextBlock]].type
+					!= Targeting::TargetType::Position
+			)
+				nextBlock++;
+			return nextBlock < static_cast<int>(mapIndices.size())
+				? mapIndices[nextBlock]
+				: mapIndices.back() + 1;
+		}
+
 		int RouteFileNumber(const std::string& name) {
 			if(!name.starts_with("targets") || !name.ends_with(".toml"))
 				return -1;
@@ -452,8 +764,14 @@ namespace xenomods {
 			currentRouteFile = fmt::format("targets{}.toml", maximum + 1);
 			Targeting::StopRoute();
 			Targeting::Targets.clear();
+			bestScriptFrames = 0;
+			scriptFrameCount = 0;
+			targetToTargetFrameCount = 0;
+			targetToTargetTimerRunning = false;
+			mostRecentTargetToTargetOriginIndex = -1;
 			lastSavedTargets.clear();
 			Targeting::SaveTargetsToFile();
+			currentRouteWasCreatedEmpty = true;
 			RescanRouteFiles();
 			SaveRouteSettingIfChanged();
 			routeFileError.clear();
@@ -510,6 +828,60 @@ namespace xenomods {
 			return -1;
 		}
 
+		int FindNextMovementTargetForMap(int current, unsigned short mapId) {
+			for(
+				int index = current + 1;
+				index < static_cast<int>(Targeting::Targets.size());
+				index++
+			) {
+				if(
+					Targeting::Targets[index].mapId == mapId
+					&& IsMovementTarget(Targeting::Targets[index])
+				)
+					return index;
+			}
+			return -1;
+		}
+
+		void CompleteTargetSplit(int targetIndex, unsigned short mapId) {
+			if(
+				targetIndex < 0
+				|| targetIndex >= static_cast<int>(Targeting::Targets.size())
+			)
+				return;
+			const bool hasNextTarget =
+				FindNextMovementTargetForMap(targetIndex, mapId) >= 0;
+			if(targetToTargetOriginIndex < 0) {
+				targetToTargetOriginIndex = targetIndex;
+				targetToTargetFrameCount = 0;
+				targetToTargetTimerRunning = hasNextTarget;
+				return;
+			}
+			if(!targetToTargetTimerRunning)
+				return;
+
+			if(
+				targetToTargetOriginIndex
+					>= static_cast<int>(Targeting::Targets.size())
+			)
+				return;
+			auto& section = Targeting::Targets[targetToTargetOriginIndex];
+			mostRecentTargetToTargetOriginIndex = targetToTargetOriginIndex;
+			inspectSelectedSplit = false;
+			section.lastFrames = targetToTargetFrameCount;
+			if(
+				targetToTargetFrameCount > 0
+				&& (section.bestFrames == 0
+					|| targetToTargetFrameCount < section.bestFrames)
+			) {
+				section.bestFrames = targetToTargetFrameCount;
+			}
+			SaveTargetsIfChanged();
+			targetToTargetOriginIndex = targetIndex;
+			targetToTargetFrameCount = 0;
+			targetToTargetTimerRunning = hasNextTarget;
+		}
+
 		int RouteNumber(int targetIndex) {
 			if(targetIndex < 0 || targetIndex >= static_cast<int>(Targeting::Targets.size()))
 				return 0;
@@ -559,6 +931,13 @@ namespace xenomods {
 				g_Logger->ToastWarning("targeting", "No targets exist for this map");
 				return;
 			}
+			scriptFrameCount = 0;
+			scriptTimerRunning = true;
+			scriptMovementComplete = false;
+			targetToTargetFrameCount = 0;
+			targetToTargetTimerRunning = false;
+			targetToTargetOriginIndex = -1;
+			inspectSelectedSplit = false;
 			if(Targeting::WarpToStart) {
 				int warpIndex = activeTargetIndex;
 				while(
@@ -579,16 +958,87 @@ namespace xenomods {
 		int MoveTargetWithinMap(int index, int direction) {
 			if(index < 0 || index >= static_cast<int>(Targeting::Targets.size()))
 				return index;
+			if(direction != -1 && direction != 1)
+				return index;
 			const auto mapId = Targeting::Targets[index].mapId;
-			int other = index + direction;
-			while(other >= 0 && other < static_cast<int>(Targeting::Targets.size())) {
-				if(Targeting::Targets[other].mapId == mapId) {
-					std::swap(Targeting::Targets[index], Targeting::Targets[other]);
-					return other;
-				}
-				other += direction;
+			const auto mapIndices = MapEntryIndices(mapId);
+			const auto selected = std::find(mapIndices.begin(), mapIndices.end(), index);
+			if(selected == mapIndices.end())
+				return index;
+			const int logicalIndex = static_cast<int>(selected - mapIndices.begin());
+
+			if(Targeting::Targets[index].type != Targeting::TargetType::Position) {
+				const int otherLogical = logicalIndex + direction;
+				if(
+					otherLogical < 0
+					|| otherLogical >= static_cast<int>(mapIndices.size())
+					|| Targeting::Targets[mapIndices[otherLogical]].type
+						== Targeting::TargetType::Position
+				)
+					return index;
+				std::swap(
+					Targeting::Targets[index],
+					Targeting::Targets[mapIndices[otherLogical]]
+				);
+				NormalizeTargetNames(Targeting::Targets);
+				return mapIndices[otherLogical];
 			}
-			return index;
+
+			int currentEnd = logicalIndex + 1;
+			while(
+				currentEnd < static_cast<int>(mapIndices.size())
+				&& Targeting::Targets[mapIndices[currentEnd]].type
+					!= Targeting::TargetType::Position
+			)
+				currentEnd++;
+
+			int rotateFirst = logicalIndex;
+			int rotateMiddle = currentEnd;
+			int rotateLast = currentEnd;
+			int newLogicalIndex = logicalIndex;
+			if(direction < 0) {
+				int previousStart = logicalIndex - 1;
+				while(
+					previousStart >= 0
+					&& Targeting::Targets[mapIndices[previousStart]].type
+						!= Targeting::TargetType::Position
+				)
+					previousStart--;
+				if(previousStart < 0)
+					return index;
+				rotateFirst = previousStart;
+				rotateMiddle = logicalIndex;
+				rotateLast = currentEnd;
+				newLogicalIndex = previousStart;
+			} else {
+				if(currentEnd >= static_cast<int>(mapIndices.size()))
+					return index;
+				int nextEnd = currentEnd + 1;
+				while(
+					nextEnd < static_cast<int>(mapIndices.size())
+					&& Targeting::Targets[mapIndices[nextEnd]].type
+						!= Targeting::TargetType::Position
+				)
+					nextEnd++;
+				rotateFirst = logicalIndex;
+				rotateMiddle = currentEnd;
+				rotateLast = nextEnd;
+				newLogicalIndex = logicalIndex + (nextEnd - currentEnd);
+			}
+
+			std::vector<Targeting::TargetData> mapEntries;
+			mapEntries.reserve(mapIndices.size());
+			for(const int mapIndex : mapIndices)
+				mapEntries.push_back(std::move(Targeting::Targets[mapIndex]));
+			std::rotate(
+				mapEntries.begin() + rotateFirst,
+				mapEntries.begin() + rotateMiddle,
+				mapEntries.begin() + rotateLast
+			);
+			for(int logical = 0; logical < static_cast<int>(mapIndices.size()); logical++)
+				Targeting::Targets[mapIndices[logical]] = std::move(mapEntries[logical]);
+			NormalizeTargetNames(Targeting::Targets);
+			return mapIndices[newLogicalIndex];
 		}
 
 		void WarpToTarget(int index) {
@@ -632,8 +1082,7 @@ namespace xenomods {
 				activeTargetIndex = FindNextTargetForMap(activeTargetIndex, mapId);
 				activeDelayIndex = -1;
 				if(activeTargetIndex < 0) {
-					Targeting::StopRoute();
-					g_Logger->ToastInfo("targeting", "Target route complete");
+					MarkRouteMovementComplete();
 					return true;
 				}
 			}
@@ -657,11 +1106,18 @@ namespace xenomods {
 					QueueAction(activeTargetIndex);
 					activeTargetIndex = FindNextTargetForMap(activeTargetIndex, mapId);
 					if(activeTargetIndex < 0) {
-						Targeting::RouteActive = false;
-						waitingForPlayer = false;
-						ResetTargetApproach();
-						InputBuffer::SetLeftStickOverride(false);
-						g_Logger->ToastInfo("targeting", "Target route complete");
+						MarkRouteMovementComplete();
+						return true;
+					}
+					continue;
+				}
+				if(Targeting::Targets[activeTargetIndex].type == Targeting::TargetType::Toggle) {
+					const auto& toggle = Targeting::Targets[activeTargetIndex];
+					if(toggle.toggleSetting == Targeting::ToggleSetting::AutoCutsceneSkips)
+						AutoCutsceneSkips::SetEnabled(toggle.toggleEnabled);
+					activeTargetIndex = FindNextTargetForMap(activeTargetIndex, mapId);
+					if(activeTargetIndex < 0) {
+						MarkRouteMovementComplete();
 						return true;
 					}
 					continue;
@@ -697,8 +1153,7 @@ namespace xenomods {
 
 				activeTargetIndex = FindNextTargetForMap(activeTargetIndex, mapId);
 				if(activeTargetIndex < 0) {
-					Targeting::StopRoute();
-					g_Logger->ToastInfo("targeting", "Target route complete");
+					MarkRouteMovementComplete();
 					return true;
 				}
 			}
@@ -708,6 +1163,7 @@ namespace xenomods {
 	} // namespace
 
 	void Targeting::StopRoute() {
+		MenuHelper::CancelActivePlayback();
 		RouteActive = false;
 		activeTargetIndex = -1;
 		waitingForPlayer = false;
@@ -717,6 +1173,10 @@ namespace xenomods {
 		ClearActiveActions();
 		ResetTargetApproach();
 		targetingMenuTasPlayback = false;
+		scriptTimerRunning = false;
+		scriptMovementComplete = false;
+		targetToTargetTimerRunning = false;
+		targetToTargetOriginIndex = -1;
 		InputBuffer::SetLeftStickOverride(false);
 	}
 
@@ -732,6 +1192,10 @@ namespace xenomods {
 		}
 
 		auto table = std::move(result).table();
+		const auto loadedBestFrames = std::max<std::int64_t>(
+			0,
+			table["best_frames"].value_or<std::int64_t>(0)
+		);
 		auto array = table.get_as<toml::array>("targets");
 		if(array == nullptr)
 			return;
@@ -756,6 +1220,8 @@ namespace xenomods {
 				? TargetType::Delay
 				: type == "action"
 					? TargetType::Action
+				: type == "toggle"
+					? TargetType::Toggle
 				: type == "shop_tas"
 					? TargetType::ShopTas
 					: type == "menu_tas"
@@ -777,6 +1243,13 @@ namespace xenomods {
 					std::numeric_limits<int>::max()
 				));
 			} else if(target.type == TargetType::Action) {
+				const auto inputType =
+					(*entry)["input_type"].value_or<std::string>("buttons");
+				target.actionInputType = inputType == "left_stick"
+					? ActionInputType::LeftStick
+					: inputType == "right_stick"
+						? ActionInputType::RightStick
+						: ActionInputType::Buttons;
 				target.buttonMask = 0;
 				if(const auto buttons = entry->get_as<toml::array>("buttons")) {
 					for(const auto& button : *buttons) {
@@ -789,6 +1262,12 @@ namespace xenomods {
 						}
 					}
 				}
+				if(const auto stick = entry->get_as<toml::array>("stick")) {
+					if(stick->size() >= 2) {
+						target.stickX = std::clamp((*stick)[0].value_or(0.f), -1.f, 1.f);
+						target.stickY = std::clamp((*stick)[1].value_or(0.f), -1.f, 1.f);
+					}
+				}
 				target.delayFrames = static_cast<int>(std::clamp<std::int64_t>(
 					(*entry)["delay_frames"].value_or<std::int64_t>(0),
 					0,
@@ -799,8 +1278,28 @@ namespace xenomods {
 					1,
 					std::numeric_limits<int>::max()
 				));
+				target.buffered = (*entry)["buffer"].value_or(false);
+				if(target.actionInputType != ActionInputType::Buttons)
+					target.buffered = false;
+			} else if(target.type == TargetType::Toggle) {
+				// Unknown future toggle names safely fall back to the only currently
+				// supported setting without changing the file's enabled state.
+				target.toggleSetting = ToggleSetting::AutoCutsceneSkips;
+				target.toggleEnabled = (*entry)["enabled"].value_or(false);
 			} else if(target.type == TargetType::Position) {
 				target.name = (*entry)["name"].value_or<std::string>("Target");
+				target.lastFrames = static_cast<std::uint64_t>(
+					std::max<std::int64_t>(
+						0,
+						(*entry)["last_frames"].value_or<std::int64_t>(0)
+					)
+				);
+				target.bestFrames = static_cast<std::uint64_t>(
+					std::max<std::int64_t>(
+						0,
+						(*entry)["best_frames"].value_or<std::int64_t>(0)
+					)
+				);
 				const auto position = entry->get_as<toml::array>("position");
 				if(position == nullptr || position->size() < 3)
 					continue;
@@ -815,6 +1314,18 @@ namespace xenomods {
 					target.type == TargetType::MenuTas
 					|| target.type == TargetType::TravelTas
 				) {
+					target.lastFrames = static_cast<std::uint64_t>(
+						std::max<std::int64_t>(
+							0,
+							(*entry)["last_frames"].value_or<std::int64_t>(0)
+						)
+					);
+					target.bestFrames = static_cast<std::uint64_t>(
+						std::max<std::int64_t>(
+							0,
+							(*entry)["best_frames"].value_or<std::int64_t>(0)
+						)
+					);
 					target.intermediate =
 						(*entry)["intermediate"].value_or(false);
 					const auto position = entry->get_as<toml::array>("position");
@@ -830,38 +1341,58 @@ namespace xenomods {
 			loadedTargets.push_back(std::move(target));
 		}
 
+		const bool namesMigrated = NormalizeTargetNames(loadedTargets);
+		if(namesMigrated) {
+			const std::string migrationBackup = TargetNamesMigrationBackupPath();
+			if(
+				!FileExists(migrationBackup)
+				&& !CopyFileUnchanged(TargetsPath(), migrationBackup)
+			) {
+				g_Logger->LogError(
+					"Couldn't create target-name migration backup {}",
+					migrationBackup
+				);
+			}
+		}
+
 		StopRoute();
 		Targets.swap(loadedTargets);
-		lastSavedTargets = SerializeTargets();
+		bestScriptFrames = static_cast<std::uint64_t>(loadedBestFrames);
+		scriptFrameCount = 0;
+		targetToTargetFrameCount = 0;
+		targetToTargetOriginIndex = -1;
+		mostRecentTargetToTargetOriginIndex = -1;
+		lastSavedTargets = namesMigrated ? std::string {} : SerializeTargets();
 		routeFileError.clear();
 		SaveRouteSettingIfChanged();
+		if(namesMigrated)
+			SaveTargetsIfChanged();
 		g_Logger->ToastInfo("targeting", "Loaded {} target(s)", Targets.size());
 	}
 
 	void Targeting::SaveTargetsToFile() {
+		NormalizeTargetNames(Targets);
 		const std::string contents = SerializeTargets();
 		if(WriteTargetsFile(TargetsPath(), contents))
 			lastSavedTargets = contents;
 	}
 
-	Targeting::TargetData* Targeting::NewTarget() {
+	int Targeting::NewTarget(int insertAfter) {
 		const auto mapId = CurrentMapId();
 		const auto mapName = detail::IsModuleRegistered(STRINGIFY(DebugStuff))
 			? DebugStuff::GetMapName(mapId)
 			: "Unknown";
-		int mapTargetCount = 0;
-		for(const auto& target : Targets) {
-			if(target.mapId == mapId)
-				mapTargetCount++;
-		}
-		Targets.push_back({
-			.name = fmt::format("{} Target {}", mapName, mapTargetCount + 1),
+		TargetData target {
+			.name = "",
 			.mapName = mapName,
 			.mapId = mapId
-		});
-		auto target = &Targets.back();
-		SetTarget(target);
-		return target;
+		};
+		const int insertionIndex = InsertionIndexAfterTargetBlock(mapId, insertAfter);
+		Targets.insert(Targets.begin() + insertionIndex, std::move(target));
+		SetTarget(&Targets[insertionIndex]);
+		NormalizeTargetNames(Targets);
+		StopRoute();
+		return insertionIndex;
 	}
 
 	int Targeting::NewDelay(int insertAfter) {
@@ -904,7 +1435,7 @@ namespace xenomods {
 			.mapName = mapName,
 			.mapId = mapId,
 			.delayFrames = 0,
-			.buttonMask = 1u << static_cast<unsigned>(nn::hid::NpadButton::A),
+			.buttonMask = PhysicalA,
 			.holdFrames = 1
 		};
 
@@ -922,6 +1453,36 @@ namespace xenomods {
 			}
 		}
 		Targets.insert(Targets.begin() + insertionIndex, std::move(action));
+		StopRoute();
+		return insertionIndex;
+	}
+
+	int Targeting::NewToggle(int insertAfter) {
+		const auto mapId = CurrentMapId();
+		const auto mapName = detail::IsModuleRegistered(STRINGIFY(DebugStuff))
+			? DebugStuff::GetMapName(mapId)
+			: "Unknown";
+		TargetData toggle {
+			.type = TargetType::Toggle,
+			.mapName = mapName,
+			.mapId = mapId,
+			.toggleSetting = ToggleSetting::AutoCutsceneSkips,
+			.toggleEnabled = false
+		};
+		int insertionIndex = static_cast<int>(Targets.size());
+		if(
+			insertAfter >= 0
+			&& insertAfter < static_cast<int>(Targets.size())
+			&& Targets[insertAfter].mapId == mapId
+		) {
+			insertionIndex = insertAfter + 1;
+		} else {
+			for(int index = 0; index < static_cast<int>(Targets.size()); index++) {
+				if(Targets[index].mapId == mapId)
+					insertionIndex = index + 1;
+			}
+		}
+		Targets.insert(Targets.begin() + insertionIndex, std::move(toggle));
 		StopRoute();
 		return insertionIndex;
 	}
@@ -988,6 +1549,7 @@ namespace xenomods {
 			: "Unknown";
 		if(const auto position = PlayerMovement::GetPartyPosition(); position != nullptr)
 			target->position = *position;
+		NormalizeTargetNames(Targets);
 	}
 
 	void Targeting::MenuWindow() {
@@ -1017,7 +1579,7 @@ namespace xenomods {
 			return;
 		}
 
-		static int selectedIndex = -1;
+		int& selectedIndex = selectedTargetIndex;
 		const float reloadWidth = ImGui::CalcTextSize("Reload").x
 			+ ImGui::GetStyle().FramePadding.x * 2.f;
 		const float newWidth = ImGui::CalcTextSize("+ New").x
@@ -1027,16 +1589,29 @@ namespace xenomods {
 			ImGui::GetContentRegionAvail().x - reloadWidth - newWidth
 				- ImGui::GetStyle().ItemSpacing.x * 2.f
 		));
+		std::string requestedRouteFile;
 		if(ImGui::BeginCombo("##RouteFile", currentRouteFile.c_str())) {
 			for(const auto& routeFile : routeFiles) {
 				if(ImGui::Selectable(routeFile.c_str(), routeFile == currentRouteFile)) {
-					SaveTargetsIfChanged();
-					currentRouteFile = routeFile;
-					LoadTargetsFromFile();
-					selectedIndex = Targets.empty() ? -1 : 0;
+					if(routeFile != currentRouteFile)
+						requestedRouteFile = routeFile;
 				}
 			}
 			ImGui::EndCombo();
+		}
+		if(!requestedRouteFile.empty()) {
+			if(currentRouteWasCreatedEmpty && Targets.empty()) {
+				const std::string emptyRoutePath = TargetsPath();
+				if(R_FAILED(nn::fs::DeleteFile(emptyRoutePath.c_str())))
+					g_Logger->LogError("Couldn't delete empty target route {}", emptyRoutePath);
+			} else {
+				SaveTargetsIfChanged();
+			}
+			currentRouteWasCreatedEmpty = false;
+			currentRouteFile = requestedRouteFile;
+			LoadTargetsFromFile();
+			RescanRouteFiles();
+			selectedIndex = Targets.empty() ? -1 : 0;
 		}
 		ImGui::SameLine();
 		if(ImGui::Button("Reload")) {
@@ -1051,11 +1626,33 @@ namespace xenomods {
 			selectedIndex = -1;
 		}
 
-		if(RouteActive) {
+		if(RouteActive || scriptTimerRunning) {
 			if(ImGui::Button("Stop"))
 				StopRoute();
 		} else if(ImGui::Button("Start")) {
 			StartRoute(selectedIndex);
+		}
+		const std::string bestFrameText = bestScriptFrames == 0
+			? "--"
+			: fmt::format("{}f", bestScriptFrames);
+		ImGui::SameLine();
+		ImGui::Text(
+			"Script: %lluf  Best: %s",
+			static_cast<unsigned long long>(scriptFrameCount),
+			bestFrameText.c_str()
+		);
+		if(ImGui::Button("Reset timer"))
+			scriptFrameCount = 0;
+		ImGui::SameLine();
+		if(ImGui::Button("Reset best")) {
+			bestScriptFrames = 0;
+			SaveTargetsIfChanged();
+		}
+		ImGui::SameLine();
+		if(ImGui::Button("Reset T2T")) {
+			for(auto& target : Targets)
+				target.bestFrames = 0;
+			SaveTargetsIfChanged();
 		}
 		ImGui::Checkbox("Start from selection", &StartFromSelection);
 		ImGui::SameLine();
@@ -1078,6 +1675,8 @@ namespace xenomods {
 				? "Delay"
 			: addType == TargetType::Action
 				? "Action"
+			: addType == TargetType::Toggle
+				? "Toggle"
 			: addType == TargetType::ShopTas
 				? "ShopTAS"
 				: addType == TargetType::MenuTas ? "MenuTAS" : "TravelTAS";
@@ -1097,6 +1696,7 @@ namespace xenomods {
 					TargetType::Position,
 					TargetType::Delay,
 					TargetType::Action,
+					TargetType::Toggle,
 					TargetType::ShopTas,
 					TargetType::MenuTas,
 					TargetType::TravelTas
@@ -1107,6 +1707,8 @@ namespace xenomods {
 							? "Delay"
 						: type == TargetType::Action
 							? "Action"
+						: type == TargetType::Toggle
+							? "Toggle"
 						: type == TargetType::ShopTas
 							? "ShopTAS"
 							: type == TargetType::MenuTas ? "MenuTAS" : "TravelTAS";
@@ -1118,12 +1720,13 @@ namespace xenomods {
 			ImGui::SameLine();
 			if(ImGui::Button("Add")) {
 				if(addType == TargetType::Position) {
-					NewTarget();
-					selectedIndex = static_cast<int>(Targets.size()) - 1;
+					selectedIndex = NewTarget(selectedIndex);
 				} else if(addType == TargetType::Delay) {
 					selectedIndex = NewDelay(selectedIndex);
 				} else if(addType == TargetType::Action) {
 					selectedIndex = NewAction(selectedIndex);
+				} else if(addType == TargetType::Toggle) {
+					selectedIndex = NewToggle(selectedIndex);
 				} else {
 					selectedIndex = NewSpecialStep(
 						addType,
@@ -1132,6 +1735,39 @@ namespace xenomods {
 					);
 				}
 			}
+			const bool validSelectedSplit = selectedIndex >= 0
+				&& selectedIndex < static_cast<int>(Targets.size())
+				&& IsMovementTarget(Targets[selectedIndex]);
+			const bool validRecentSplit =
+				mostRecentTargetToTargetOriginIndex >= 0
+				&& mostRecentTargetToTargetOriginIndex
+					< static_cast<int>(Targets.size());
+			const int splitTargetIndex = targetToTargetTimerRunning
+				&& targetToTargetOriginIndex >= 0
+				? targetToTargetOriginIndex
+				: !scriptTimerRunning && inspectSelectedSplit && validSelectedSplit
+					? selectedIndex
+					: !scriptTimerRunning && validRecentSplit
+						? mostRecentTargetToTargetOriginIndex
+						: !scriptTimerRunning && validSelectedSplit
+							? selectedIndex
+							: -1;
+			const std::string splitTimeText = targetToTargetTimerRunning
+				? fmt::format("{}f", targetToTargetFrameCount)
+				: splitTargetIndex >= 0
+					&& Targets[splitTargetIndex].lastFrames > 0
+					? fmt::format("{}f", Targets[splitTargetIndex].lastFrames)
+					: "--";
+			const std::string splitBestText = splitTargetIndex >= 0
+				&& Targets[splitTargetIndex].bestFrames > 0
+				? fmt::format("{}f", Targets[splitTargetIndex].bestFrames)
+				: "--";
+			ImGui::SameLine(0.f, 12.f);
+			ImGui::Text(
+				"T2T: %s  Best: %s",
+				splitTimeText.c_str(),
+				splitBestText.c_str()
+			);
 			if(canBeIntermediate)
 				ImGui::Checkbox("Intermediate", &addIntermediate);
 		}
@@ -1143,11 +1779,22 @@ namespace xenomods {
 				ImGui::Text("Starting in %d frame(s)", startDelayFrames);
 			else if(activeDelayIndex == activeTargetIndex)
 				ImGui::Text("Delay: %df", delayFramesRemaining);
-			else if(activeActionIndex == activeTargetIndex) {
-				if(actionHoldStarted)
-					ImGui::Text("Action: %s", ActionName(Targets[activeTargetIndex].buttonMask).c_str());
-				else
-					ImGui::Text("Action delay: %df", actionDelayFramesRemaining);
+			else if(!activeActions.empty()) {
+				const auto& runtime = activeActions.front();
+				if(runtime.index >= 0 && runtime.index < static_cast<int>(Targets.size())) {
+					if(runtime.started)
+						ImGui::Text(
+							"Action: %s%s",
+							ActionName(Targets[runtime.index]).c_str(),
+							activeActions.size() > 1 ? " + others" : ""
+						);
+					else
+						ImGui::Text(
+							"Action delay: %df%s",
+							runtime.delayFramesRemaining,
+							activeActions.size() > 1 ? " + others" : ""
+						);
+				}
 			}
 			else if(
 				activeTargetIndex >= 0
@@ -1199,9 +1846,12 @@ namespace xenomods {
 			&& IsMenuTasStep(Targets[selectedIndex]);
 		const bool selectedAction = hasSelection
 			&& Targets[selectedIndex].type == TargetType::Action;
+		const bool selectedToggle = hasSelection
+			&& Targets[selectedIndex].type == TargetType::Toggle;
 		const float editorReserve = hasSelection
 			? ImGui::GetTextLineHeightWithSpacing()
-				* (selectedMenuTas ? 5.5f : selectedAction ? 4.5f : 4.5f)
+				* (selectedMenuTas ? 5.5f : selectedAction ? 5.5f
+					: selectedToggle ? 3.5f : 4.5f)
 				+ ImGui::GetFrameHeightWithSpacing()
 			: 0.f;
 		const float listHeight = std::max(
@@ -1214,32 +1864,39 @@ namespace xenomods {
 				std::string label;
 				if(Targets[index].type == TargetType::Delay) {
 					label = fmt::format(
-						"Delay: {}f{}",
+						"    Delay: {}f{}",
 						std::max(0, Targets[index].delayFrames),
 						index == activeTargetIndex ? "  [ACTIVE]" : ""
 					);
 				} else if(Targets[index].type == TargetType::Action) {
 					label = fmt::format(
-						"Action: {}{}",
-						ActionName(Targets[index].buttonMask),
+						"    Action: {}{}{}",
+						ActionName(Targets[index]),
+						Targets[index].buffered ? "  [BUFFERED]" : "",
+						index == activeTargetIndex ? "  [ACTIVE]" : ""
+					);
+				} else if(Targets[index].type == TargetType::Toggle) {
+					label = fmt::format(
+						"    Toggle: Auto Cutscene Skips -> {}{}",
+						Targets[index].toggleEnabled ? "Enable" : "Disable",
 						index == activeTargetIndex ? "  [ACTIVE]" : ""
 					);
 				} else if(Targets[index].type == TargetType::ShopTas) {
 					label = fmt::format(
-						"ShopTAS: {}{}",
+						"    ShopTAS: {}{}",
 						Targets[index].name.empty() ? "<select recording>" : Targets[index].name,
 						index == activeTargetIndex ? "  [ACTIVE]" : ""
 					);
 				} else if(Targets[index].type == TargetType::MenuTas) {
 					label = fmt::format(
-						"MenuTAS: {}{}{}",
+						"    MenuTAS: {}{}{}",
 						Targets[index].name.empty() ? "<select recording>" : Targets[index].name,
 						Targets[index].intermediate ? "  [INTERMEDIATE]" : "",
 						index == activeTargetIndex ? "  [ACTIVE]" : ""
 					);
 				} else if(Targets[index].type == TargetType::TravelTas) {
 					label = fmt::format(
-						"TravelTAS: {}{}{}",
+						"    TravelTAS: {}{}{}",
 						Targets[index].name.empty() ? "<select recording>" : Targets[index].name,
 						Targets[index].intermediate ? "  [INTERMEDIATE]" : "",
 						index == activeTargetIndex ? "  [ACTIVE]" : ""
@@ -1252,8 +1909,10 @@ namespace xenomods {
 						index == activeTargetIndex ? "  [ACTIVE]" : ""
 					);
 				}
-				if(ImGui::Selectable(label.c_str(), selectedIndex == index))
+				if(ImGui::Selectable(label.c_str(), selectedIndex == index)) {
 					selectedIndex = index;
+					inspectSelectedSplit = true;
+				}
 				ImGui::PopID();
 			}
 		}
@@ -1274,6 +1933,35 @@ namespace xenomods {
 					target.delayFrames = std::max(0, target.delayFrames);
 				ImGui::TextDisabled("Delay: %df", std::max(0, target.delayFrames));
 			} else if(target.type == TargetType::Action) {
+				const char* inputTypeName = target.actionInputType == ActionInputType::Buttons
+					? "Buttons"
+					: target.actionInputType == ActionInputType::LeftStick
+						? "Left Stick"
+						: "Right Stick";
+				ImGui::TextUnformatted("Type:");
+				ImGui::SameLine();
+				ImGui::SetNextItemWidth(-1.f);
+				if(ImGui::BeginCombo("##ActionInputType", inputTypeName)) {
+					for(const auto type : {
+						ActionInputType::Buttons,
+						ActionInputType::LeftStick,
+						ActionInputType::RightStick
+					}) {
+						const char* name = type == ActionInputType::Buttons
+							? "Buttons"
+							: type == ActionInputType::LeftStick
+								? "Left Stick"
+								: "Right Stick";
+						if(ImGui::Selectable(name, target.actionInputType == type)) {
+							target.actionInputType = type;
+							if(type != ActionInputType::Buttons)
+								target.buffered = false;
+						}
+					}
+					ImGui::EndCombo();
+				}
+
+				if(target.actionInputType == ActionInputType::Buttons) {
 				ImGui::TextUnformatted("Input:");
 				ImGui::SameLine();
 				const std::string preview = ActionName(target.buttonMask);
@@ -1293,6 +1981,20 @@ namespace xenomods {
 						}
 					}
 					ImGui::EndCombo();
+				}
+				} else {
+					const float axisWidth = 92.f;
+					ImGui::TextUnformatted("X:");
+					ImGui::SameLine();
+					ImGui::SetNextItemWidth(axisWidth);
+					if(ImGui::DragFloat("##ActionStickX", &target.stickX, 0.01f, -1.f, 1.f, "%.2f"))
+						target.stickX = std::clamp(target.stickX, -1.f, 1.f);
+					ImGui::SameLine();
+					ImGui::TextUnformatted("Y:");
+					ImGui::SameLine();
+					ImGui::SetNextItemWidth(axisWidth);
+					if(ImGui::DragFloat("##ActionStickY", &target.stickY, 0.01f, -1.f, 1.f, "%.2f"))
+						target.stickY = std::clamp(target.stickY, -1.f, 1.f);
 				}
 				const float valueWidth = 72.f;
 				ImGui::TextUnformatted("Delay:");
@@ -1320,8 +2022,34 @@ namespace xenomods {
 					"%df"
 				))
 					target.holdFrames = std::max(1, target.holdFrames);
+				if(target.actionInputType == ActionInputType::Buttons)
+					ImGui::Checkbox("Buffer", &target.buffered);
+			} else if(target.type == TargetType::Toggle) {
+				ImGui::TextUnformatted("Toggle:");
+				ImGui::SameLine();
+				ImGui::SetNextItemWidth(180.f);
+				if(ImGui::BeginCombo("##ToggleSetting", "Auto Cutscene Skips")) {
+					if(ImGui::Selectable(
+						"Auto Cutscene Skips",
+						target.toggleSetting == ToggleSetting::AutoCutsceneSkips
+					))
+						target.toggleSetting = ToggleSetting::AutoCutsceneSkips;
+					ImGui::EndCombo();
+				}
+				ImGui::SameLine();
+				ImGui::SetNextItemWidth(90.f);
+				if(ImGui::BeginCombo(
+					"##ToggleState",
+					target.toggleEnabled ? "Enable" : "Disable"
+				)) {
+					if(ImGui::Selectable("Enable", target.toggleEnabled))
+						target.toggleEnabled = true;
+					if(ImGui::Selectable("Disable", !target.toggleEnabled))
+						target.toggleEnabled = false;
+					ImGui::EndCombo();
+				}
 			} else if(target.type == TargetType::Position) {
-				ImGui::InputText("Name", &target.name);
+				ImGui::Text("Name: %s", target.name.c_str());
 				ImGui::TextUnformatted("Position");
 				ImGui::SameLine();
 				DrawPreciseCoordinate("X", target.position.x);
@@ -1404,6 +2132,7 @@ namespace xenomods {
 			if(ImGui::Button("Delete")) {
 				StopRoute();
 				Targets.erase(Targets.begin() + selectedIndex);
+				NormalizeTargetNames(Targets);
 				selectedIndex = Targets.empty()
 					? -1
 					: std::min(selectedIndex, static_cast<int>(Targets.size()) - 1);
@@ -1427,6 +2156,10 @@ namespace xenomods {
 	}
 
 	void Targeting::Update(fw::UpdateInfo*) {
+		if(scriptTimerRunning)
+			scriptFrameCount++;
+		if(targetToTargetTimerRunning)
+			targetToTargetFrameCount++;
 		SaveTargetsIfChanged();
 		UpdateTargetsBackup();
 		if(
@@ -1447,6 +2180,12 @@ namespace xenomods {
 					|| !IsFinite(target.position)
 				)
 					continue;
+				const bool highlighted = index == activeTargetIndex
+					|| (
+						!RouteActive
+						&& !scriptTimerRunning
+						&& index == selectedTargetIndex
+					);
 				glm::mat4 matrix(1.f);
 				matrix = glm::translate(matrix, target.position);
 				fw::debug::drawCompareZ(false);
@@ -1458,7 +2197,7 @@ namespace xenomods {
 				) {
 					debug::drawFontFmtShadow3D(
 						target.position,
-						index == activeTargetIndex ? mm::Col4::yellow : mm::Col4::white,
+						highlighted ? mm::Col4::yellow : mm::Col4::white,
 						target.type == TargetType::TravelTas
 							? "TravelTAS: {}"
 							: "MenuTAS: {}",
@@ -1467,7 +2206,7 @@ namespace xenomods {
 				} else {
 					debug::drawFontFmtShadow3D(
 						target.position,
-						index == activeTargetIndex ? mm::Col4::yellow : mm::Col4::white,
+						highlighted ? mm::Col4::yellow : mm::Col4::white,
 						"{}: {}",
 						RouteNumber(index),
 						target.name
@@ -1475,9 +2214,13 @@ namespace xenomods {
 				}
 			}
 		}
+		const bool nativeControlFree = gf::GfGameManager::isControlFree();
+		const bool tutorialMovementAllowed =
+			detail::IsModuleRegistered(STRINGIFY(DebugStuff))
+			&& DebugStuff::ShouldBypassControlLockForTutorial(nativeControlFree);
 		const bool actionControlFree = PlayerMovement::GetPartyPosition() != nullptr
 			&& CameraTools::HasCameraState
-			&& gf::GfGameManager::isControlFree();
+			&& (nativeControlFree || tutorialMovementAllowed);
 		UpdateActiveAction(actionControlFree);
 		if(
 			targetingMenuTasPlayback
@@ -1488,6 +2231,7 @@ namespace xenomods {
 			return;
 		}
 		targetingMenuTasPlayback = false;
+		TryCompleteScriptTimer();
 
 		if(!RouteActive) {
 			InputBuffer::SetLeftStickOverride(false);
@@ -1519,13 +2263,20 @@ namespace xenomods {
 			InputBuffer::SetLeftStickOverride(false);
 			return;
 		}
-		if(!gf::GfGameManager::isControlFree()) {
+		if(!nativeControlFree && !tutorialMovementAllowed) {
 			waitingForPlayer = true;
 			ResetTargetApproach();
 			InputBuffer::SetLeftStickOverride(false);
 			return;
 		}
 		waitingForPlayer = false;
+		// Route delays obey the same control lock as movement and Actions. The
+		// sole exception is the confirmed tutorial lock above; collection-point
+		// animations and every other loss of field control pause the countdown.
+		if(Targets[activeTargetIndex].type == TargetType::Delay) {
+			if(ConsumeActiveDelaySteps(mapId))
+				return;
+		}
 		if(
 			!IsFinite(*playerPosition)
 			|| !IsFinite(CameraTools::CamMeta.forward)
@@ -1559,6 +2310,7 @@ namespace xenomods {
 			&& glm::dot(previousTargetDelta, delta) <= 0.f;
 		while(distance <= completionDistance || crossedExactTarget) {
 			const auto& reachedTarget = Targets[movementTargetIndex];
+			CompleteTargetSplit(movementTargetIndex, mapId);
 			if(IsMenuTasStep(reachedTarget) && !reachedTarget.intermediate) {
 				InputBuffer::SetLeftStickOverride(false);
 				ResetTargetApproach();
@@ -1580,16 +2332,15 @@ namespace xenomods {
 				);
 				targetingMenuTasPlayback = true;
 				if(activeTargetIndex < 0) {
-					RouteActive = false;
-					g_Logger->ToastInfo("targeting", "Target route complete");
+					MarkRouteMovementComplete();
 				}
 				return;
 			}
 			activeTargetIndex = FindNextTargetForMap(activeTargetIndex, mapId);
 			ResetTargetApproach();
 			if(activeTargetIndex < 0) {
-				StopRoute();
-				g_Logger->ToastInfo("targeting", "Target route complete");
+				MarkRouteMovementComplete();
+				TryCompleteScriptTimer();
 				return;
 			}
 			if(ConsumeActiveSpecialSteps(mapId))
@@ -1636,6 +2387,11 @@ namespace xenomods {
 	}
 
 	void Targeting::OnMapChange(unsigned short mapId) {
+		if(scriptTimerRunning) {
+			scriptFrameCount = 0;
+			targetToTargetFrameCount = 0;
+			targetToTargetOriginIndex = -1;
+		}
 		if(
 			RouteActive
 			&& (
@@ -1645,6 +2401,8 @@ namespace xenomods {
 			)
 		)
 			activeTargetIndex = FindFirstTargetForMap(mapId);
+		if(scriptTimerRunning && !scriptMovementComplete)
+			targetToTargetTimerRunning = false;
 	}
 
 #if XENOMODS_CODENAME(bf2)

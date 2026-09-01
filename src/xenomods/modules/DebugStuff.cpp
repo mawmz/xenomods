@@ -311,6 +311,9 @@ namespace {
 
 	std::array<TutorialTriggerEntry, MaxTutorialTriggers> tutorialTriggers {};
 	std::size_t tutorialTriggerCount = 0;
+	void* tutorialControlTrigger = nullptr;
+	bool tutorialControlLockObserved = false;
+	int tutorialControlLockArmFrames = 0;
 	bool tutorialTriggerRegistryOverflowLogged = false;
 	int minimumTutorialFlagId = 0x7FFFFFFF;
 	int maximumTutorialFlagId = -1;
@@ -663,6 +666,9 @@ namespace {
 		DestroyAllTutorialTriggerModels();
 		tutorialTriggers = {};
 		tutorialTriggerCount = 0;
+		tutorialControlTrigger = nullptr;
+		tutorialControlLockObserved = false;
+		tutorialControlLockArmFrames = 0;
 		tutorialTriggerRegistryOverflowLogged = false;
 		minimumTutorialFlagId = 0x7FFFFFFF;
 		maximumTutorialFlagId = -1;
@@ -2252,6 +2258,13 @@ namespace {
 		static void Hook(void* tutorial) {
 			auto entry = CaptureTutorialTrigger(tutorial);
 			Orig(tutorial);
+			// Only a real beginTutorial() dispatch may authorize Targeting to run
+			// through a tutorial-owned control lock. Merely standing inside the
+			// trigger volume is insufficient: that state can outlive the tutorial
+			// and overlap collection-point interactions.
+			tutorialControlTrigger = tutorial;
+			tutorialControlLockObserved = false;
+			tutorialControlLockArmFrames = 30;
 			if(entry != nullptr) {
 				entry = CaptureTutorialTrigger(tutorial);
 				xenomods::g_Logger->LogInfo(
@@ -3522,6 +3535,34 @@ namespace xenomods {
 			true
 		);
 #endif
+	}
+
+	bool DebugStuff::ShouldBypassControlLockForTutorial(bool controlFree) {
+		if(tutorialControlTrigger == nullptr)
+			return false;
+
+		const auto entry = FindTutorialTrigger(tutorialControlTrigger);
+		if(entry == nullptr || !IsInsideTutorialTrigger(tutorialControlTrigger)) {
+			tutorialControlTrigger = nullptr;
+			tutorialControlLockObserved = false;
+			tutorialControlLockArmFrames = 0;
+			return false;
+		}
+
+		if(!controlFree) {
+			tutorialControlLockObserved = true;
+			return true;
+		}
+
+		// Once the tutorial-owned lock has released, revoke the exception even
+		// if Rex remains physically inside the trigger. This is what prevents a
+		// later collection animation in the same volume from inheriting it.
+		if(tutorialControlLockObserved || --tutorialControlLockArmFrames <= 0) {
+			tutorialControlTrigger = nullptr;
+			tutorialControlLockObserved = false;
+			tutorialControlLockArmFrames = 0;
+		}
+		return false;
 	}
 
 	void DebugStuff::Update(fw::UpdateInfo* updateInfo) {

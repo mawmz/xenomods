@@ -24,6 +24,8 @@ add_executable(xenomods
 		xenomods/modules/CameraTools.cpp
 		xenomods/modules/RenderingControls.cpp
 		xenomods/modules/AudioControls.cpp
+		xenomods/modules/AutoTutorials.cpp
+		xenomods/modules/AutoCutsceneSkips.cpp
 		xenomods/modules/BattleCheats.cpp
 		xenomods/modules/CombatAiDebug.cpp
 		xenomods/modules/ReactionControls.cpp
@@ -31,6 +33,7 @@ add_executable(xenomods
 		xenomods/modules/PlayerMovement.cpp
 		xenomods/modules/Targeting.cpp
 		xenomods/modules/MenuHelper.cpp
+		xenomods/modules/BladePulls.cpp
 		xenomods/modules/SkipTravelProfiler.cpp
 		xenomods/modules/FrameratePatch.cpp
 		xenomods/modules/FileDetours.cpp

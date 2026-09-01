@@ -18,7 +18,7 @@ namespace xenomods {
 		// very yucky, but this way it's in one spot
 #define CONFIG_PORT_DEFAULT 6969
 #define CONFIG_LOGGING_LEVEL_DEFAULT underlying_value(Logger::Severity::Info)
-#define CONFIG_MENU_THEME_DEFAULT underlying_value(Menu::Theme::DougBinks)
+#define CONFIG_MENU_THEME_DEFAULT underlying_value(Menu::Theme::Comfy)
 #define CONFIG_MENU_FONTS_DEFAULT {}
 #define CONFIG_DUMP_FILE_READS_DEFAULT false
 #define CONFIG_ENABLE_FILE_OVERRIDES_DEFAULT true

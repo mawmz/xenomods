@@ -401,7 +401,8 @@ namespace xenomods {
 			g_Logger->LogError("Reaction control symbols are unavailable");
 			return;
 		}
-		g_Menu->RegisterTopBarCallback(&TopBarButton);
+		if(auto misc = g_Menu->FindSection("misc"); misc != nullptr)
+			misc->RegisterRenderCallback(&TopBarButton);
 		g_Menu->RegisterRenderCallback(&MenuWindow, true);
 		g_Logger->LogInfo("Reaction controls installed");
 #endif

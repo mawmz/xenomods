@@ -14,9 +14,18 @@ namespace xenomods {
 			Position,
 			Delay,
 			Action,
+			Toggle,
 			ShopTas,
 			MenuTas,
 			TravelTas
+		};
+		enum class ToggleSetting {
+			AutoCutsceneSkips
+		};
+		enum class ActionInputType {
+			Buttons,
+			LeftStick,
+			RightStick
 		};
 
 		struct TargetData {
@@ -27,7 +36,15 @@ namespace xenomods {
 			glm::vec3 position {};
 			int delayFrames = 60;
 			std::uint32_t buttonMask = 0;
+			ActionInputType actionInputType = ActionInputType::Buttons;
+			float stickX = 0.f;
+			float stickY = 0.f;
+			std::uint64_t lastFrames = 0;
+			std::uint64_t bestFrames = 0;
 			int holdFrames = 1;
+			bool buffered = false;
+			ToggleSetting toggleSetting = ToggleSetting::AutoCutsceneSkips;
+			bool toggleEnabled = false;
 			bool intermediate = false;
 		};
 
@@ -42,9 +59,10 @@ namespace xenomods {
 		static void MenuWindow();
 		static void LoadTargetsFromFile();
 		static void SaveTargetsToFile();
-		static TargetData* NewTarget();
+		static int NewTarget(int insertAfter = -1);
 		static int NewDelay(int insertAfter = -1);
 		static int NewAction(int insertAfter = -1);
+		static int NewToggle(int insertAfter = -1);
 		static int NewSpecialStep(
 			TargetType type,
 			int insertAfter = -1,

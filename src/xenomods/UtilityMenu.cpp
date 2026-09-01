@@ -13,6 +13,8 @@
 
 #include "modules/BattleCheats.hpp"
 #include "modules/AudioControls.hpp"
+#include "modules/AutoTutorials.hpp"
+#include "modules/AutoCutsceneSkips.hpp"
 #include "modules/CameraTools.hpp"
 #include "modules/CombatAiDebug.hpp"
 #include "modules/DebugStuff.hpp"
@@ -142,7 +144,7 @@ namespace xenomods::UtilityMenu {
 
 		toolwindow::SetCompactWidth();
 		toolwindow::SetStackedPosition(toolwindow::StackSlot::Utility);
-		ImGui::SetNextWindowSize(ImVec2(300.f, 170.f), ImGuiCond_Appearing);
+		ImGui::SetNextWindowSize(ImVec2(300.f, 185.f), ImGuiCond_Appearing);
 		if(!ImGui::Begin("Utility", &ShowWindow)) {
 			toolwindow::RecordCurrentHeight(toolwindow::StackSlot::Utility);
 			toolwindow::SetVisible(toolwindow::StackSlot::Utility, ShowWindow);
@@ -191,6 +193,11 @@ namespace xenomods::UtilityMenu {
 				AudioControls::MenuSection();
 				ImGui::EndTabItem();
 			}
+			if(Tab("Playback", 5)) {
+				AutoCutsceneSkips::MenuSection();
+				AudioControls::PlaybackMenuSection();
+				ImGui::EndTabItem();
+			}
 			ImGui::EndTabBar();
 		}
 		applySavedTab = false;
@@ -214,7 +221,7 @@ namespace xenomods::UtilityMenu {
 			CombatAiDebug::ShowFrameCounter = table["frame_counter"].value_or(false);
 			AudioControls::BackgroundMusic =
 				table["background_music"].value_or(true);
-			selectedTab = std::clamp(table["utility_tab"].value_or(0), 0, 4);
+			selectedTab = std::clamp(table["utility_tab"].value_or(0), 0, 5);
 		}
 		lastSaved = CurrentState();
 		g_Menu->RegisterTopBarCallback(&TopBar);

@@ -32,6 +32,7 @@ namespace xenomods {
 		static int lastChangedLocalFlagBitSize;
 
 		static unsigned short GetMapId();
+		static bool ShouldBypassControlLockForTutorial(bool controlFree);
 		static std::string GetMapName(int id);
 		static std::string GetMapName() {
 			return GetMapName(GetMapId());
